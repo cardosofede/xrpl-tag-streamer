@@ -4,7 +4,7 @@ Loads settings from environment variables with sensible defaults.
 """
 
 import os
-from typing import Dict, List, Optional, Any
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -16,7 +16,7 @@ XRPL_WS_URL = os.getenv("XRPL_WS_URL", "wss://s.altnet.rippletest.net/")
 XRPL_RPC_URL = os.getenv("XRPL_RPC_URL", "https://s.altnet.rippletest.net:51234/")
 
 # MongoDB Configuration
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://wiz-ai:wiz-ai@localhost:27017/")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "xrpl_transactions")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "transactions")
 
@@ -41,3 +41,4 @@ DEFAULT_USERS = [
 
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
