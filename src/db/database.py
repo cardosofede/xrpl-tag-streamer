@@ -1,194 +1,370 @@
 """
-Database module for DuckDB operations.
-Handles connection, schema creation, and query operations.
+MongoDB database module for storing XRPL transactions.
 """
 
-import json
 import logging
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import duckdb
-import pandas as pd
+import pymongo
+from pymongo import MongoClient
+from pymongo.collection import Collection
+from pymongo.database import Database
 
-from src.config import get_db_path
+from src.config import MONGO_URI, MONGO_DB_NAME, MONGO_COLLECTION
 
 logger = logging.getLogger(__name__)
 
-class XRPLDatabase:
-    """DuckDB database manager for XRPL transactions."""
+class MongoDatabase:
+    """MongoDB database for storing XRPL transactions."""
     
-    def __init__(self, db_path: Optional[Path] = None):
-        """Initialize the database connection and create tables if needed."""
-        self.db_path = db_path or get_db_path()
-        self.con = duckdb.connect(str(self.db_path))
-        self._create_schema()
+    def __init__(
+        self,
+        mongo_uri: str = MONGO_URI,
+        db_name: str = MONGO_DB_NAME,
+        collection_name: str = MONGO_COLLECTION
+    ):
+        """
+        Initialize the MongoDB database.
         
-    def _create_schema(self) -> None:
-        """Create the necessary tables if they don't exist."""
-        self.con.execute("""
-            CREATE TABLE IF NOT EXISTS ledgers (
-                ledger_index BIGINT PRIMARY KEY,
-                ledger_hash VARCHAR,
-                ledger_time TIMESTAMP,
-                tx_count INTEGER,
-                close_time TIMESTAMP,
-                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
+        Args:
+            mongo_uri: MongoDB connection string
+            db_name: MongoDB database name
+            collection_name: MongoDB collection name
+        """
+        self.client: Optional[MongoClient] = None
+        self.db: Optional[Database] = None
+        self.collection: Optional[Collection] = None
+        self.users_collection: Optional[Collection] = None
         
-        self.con.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                tx_hash VARCHAR PRIMARY KEY,
-                ledger_index BIGINT,
-                tx_index INTEGER,
-                account VARCHAR,
-                destination VARCHAR,
-                amount VARCHAR,
-                fee VARCHAR,
-                transaction_type VARCHAR,
-                source_tag INTEGER,
-                destination_tag INTEGER,
-                tx_time TIMESTAMP,
-                tag_matched BOOLEAN,
-                memo_data VARCHAR,
-                raw_tx JSON,
-                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (ledger_index) REFERENCES ledgers(ledger_index)
-            );
-        """)
+        self.mongo_uri = mongo_uri
+        self.db_name = db_name
+        self.collection_name = collection_name
         
-        # Create indices for faster querying
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_tx_ledger_index ON transactions(ledger_index);")
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_tx_account ON transactions(account);")
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_tx_destination ON transactions(destination);")
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_tx_tag_matched ON transactions(tag_matched);")
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_tx_source_tag ON transactions(source_tag);")
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_tx_destination_tag ON transactions(destination_tag);")
+        # Connect to MongoDB
+        self.connect()
     
-    def store_ledger(self, ledger_data: Dict[str, Any]) -> None:
-        """Store a ledger in the database."""
+    def connect(self) -> None:
+        """Connect to MongoDB and ensure collections exist."""
         try:
-            # Convert UNIX timestamp to datetime
-            ledger_time = datetime.fromtimestamp(ledger_data.get("ledger_time", 0))
-            close_time = datetime.fromtimestamp(ledger_data.get("close_time", 0))
+            logger.info(f"Connecting to MongoDB: {self.mongo_uri}")
+            self.client = MongoClient(self.mongo_uri)
             
-            self.con.execute("""
-                INSERT OR REPLACE INTO ledgers (
-                    ledger_index, ledger_hash, ledger_time, tx_count, close_time
-                ) VALUES (?, ?, ?, ?, ?)
-            """, (
-                ledger_data.get("ledger_index"),
-                ledger_data.get("ledger_hash"),
-                ledger_time,
-                ledger_data.get("txn_count", 0),
-                close_time
-            ))
-            logger.debug(f"Stored ledger {ledger_data.get('ledger_index')}")
+            # Check connection by pinging the database
+            self.client.admin.command('ping')
+            logger.info("Connected to MongoDB successfully")
+            
+            # Get database (will be created if it doesn't exist)
+            self.db = self.client[self.db_name]
+            
+            # Check and create collections if they don't exist
+            self._ensure_collections_exist()
+            
+            # Get references to collections
+            self.collection = self.db[self.collection_name]
+            self.users_collection = self.db["users"]
+            
+            # Create indexes
+            self._create_indexes()
+            
+            logger.info(f"MongoDB initialization complete: database '{self.db_name}' with collections '{self.collection_name}' and 'users'")
         except Exception as e:
-            logger.error(f"Error storing ledger: {e}")
+            logger.error(f"Failed to connect to MongoDB: {e}")
+            raise
     
-    def store_transaction(self, tx_data: Dict[str, Any], tag_matched: bool = False) -> None:
-        """Store a transaction in the database."""
-        try:
-            # Extract basic transaction data
-            tx_hash = tx_data.get("hash")
-            ledger_index = tx_data.get("ledger_index")
-            
-            # Get tx_index from either the direct field or from metaData
-            # XRPL may provide it differently depending on the API response format
-            tx_index = 0
-            if "metaData" in tx_data and isinstance(tx_data["metaData"], dict):
-                tx_index = tx_data["metaData"].get("TransactionIndex", 0)
-            elif "meta" in tx_data and isinstance(tx_data["meta"], dict):
-                tx_index = tx_data["meta"].get("TransactionIndex", 0)
-            elif "tx_index" in tx_data:
-                tx_index = tx_data.get("tx_index", 0)
-            
-            account = tx_data.get("Account")
-            destination = tx_data.get("Destination", "")
-            amount = tx_data.get("Amount", "")
-            fee = tx_data.get("Fee", "")
-            tx_type = tx_data.get("TransactionType", "")
-            source_tag = tx_data.get("SourceTag")
-            destination_tag = tx_data.get("DestinationTag")
-            
-            # Extract memo data if present
-            memo_data = ""
-            if "Memos" in tx_data and tx_data["Memos"]:
-                for memo in tx_data["Memos"]:
-                    if "Memo" in memo and "MemoData" in memo["Memo"]:
-                        memo_data += memo["Memo"]["MemoData"] + " "
-            
-            # Convert UNIX timestamp to datetime
-            tx_time = datetime.fromtimestamp(tx_data.get("date", 0))
-            
-            # Store raw transaction as JSON
-            raw_tx = json.dumps(tx_data)
-            
-            self.con.execute("""
-                INSERT OR REPLACE INTO transactions (
-                    tx_hash, ledger_index, tx_index, account, destination, 
-                    amount, fee, transaction_type, source_tag, destination_tag,
-                    tx_time, tag_matched, memo_data, raw_tx
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                tx_hash, ledger_index, tx_index, account, destination,
-                amount, fee, tx_type, source_tag, destination_tag,
-                tx_time, tag_matched, memo_data, raw_tx
-            ))
-            logger.debug(f"Stored transaction {tx_hash}")
-        except Exception as e:
-            logger.error(f"Error storing transaction: {e}")
+    def _ensure_collections_exist(self) -> None:
+        """Ensure required collections exist in the database."""
+        existing_collections = self.db.list_collection_names()
+        logger.info(f"Existing collections: {existing_collections}")
+        
+        # Check and create transactions collection
+        if self.collection_name not in existing_collections:
+            logger.info(f"Creating collection: {self.collection_name}")
+            self.db.create_collection(self.collection_name)
+        
+        # Check and create users collection
+        if "users" not in existing_collections:
+            logger.info("Creating collection: users")
+            self.db.create_collection("users")
     
-    def get_latest_ledger_index(self) -> int:
-        """Get the index of the latest stored ledger."""
-        result = self.con.execute("SELECT MAX(ledger_index) FROM ledgers").fetchone()
-        return result[0] if result and result[0] is not None else 0
-    
-    def get_ledger_range(self, start_index: int, end_index: int) -> List[Dict]:
-        """Get the ledgers within a specific range."""
-        query = """
-            SELECT ledger_index, ledger_hash, ledger_time, tx_count, close_time
-            FROM ledgers
-            WHERE ledger_index BETWEEN ? AND ?
-            ORDER BY ledger_index
-        """
-        result = self.con.execute(query, (start_index, end_index)).fetchall()
-        return [dict(zip(["ledger_index", "ledger_hash", "ledger_time", "tx_count", "close_time"], row))
-                for row in result]
-    
-    def get_transactions_with_tag(self, tag: str, limit: int = 100) -> pd.DataFrame:
-        """
-        Get transactions that match a specific tag in source_tag, destination_tag, or memo.
-        Returns as pandas DataFrame for easy analysis.
-        """
-        query = f"""
-            SELECT *
-            FROM transactions
-            WHERE tag_matched = true
-            ORDER BY tx_time DESC
-            LIMIT {limit}
-        """
-        return self.con.execute(query).df()
-    
-    def is_transaction_exists(self, tx_hash: str) -> bool:
-        """Check if a transaction already exists in the database."""
-        result = self.con.execute("SELECT 1 FROM transactions WHERE tx_hash = ?", (tx_hash,)).fetchone()
-        return result is not None
-    
-    def is_ledger_exists(self, ledger_index: int) -> bool:
-        """Check if a ledger already exists in the database."""
-        result = self.con.execute("SELECT 1 FROM ledgers WHERE ledger_index = ?", (ledger_index,)).fetchone()
-        return result is not None
+    def _create_indexes(self) -> None:
+        """Create indexes on collections."""
+        logger.info("Creating indexes on collections")
+        
+        # Transactions collection indexes
+        self.collection.create_index("hash", unique=True)
+        self.collection.create_index("ledger_index")
+        self.collection.create_index("Account")
+        self.collection.create_index("Destination")
+        self.collection.create_index("user_id")
+        logger.info(f"Created indexes on '{self.collection_name}' collection")
+        
+        # Users collection indexes
+        self.users_collection.create_index("id", unique=True)
+        logger.info("Created indexes on 'users' collection")
     
     def close(self) -> None:
-        """Close the database connection."""
-        self.con.close()
+        """Close MongoDB connection."""
+        if self.client:
+            self.client.close()
+            logger.info("MongoDB connection closed")
+    
+    def store_transaction(self, tx: Dict[str, Any], user_id: str) -> bool:
+        """
+        Store a transaction in MongoDB.
         
-    def __enter__(self):
-        return self
+        Args:
+            tx: The transaction data
+            user_id: ID of the user who owns the wallet
+            
+        Returns:
+            bool: True if successfully stored, False otherwise
+        """
+        if not self.collection:
+            logger.error("MongoDB collection not available")
+            return False
         
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close() 
+        # Add user_id to transaction
+        tx["user_id"] = user_id
+        
+        try:
+            # Use hash as unique identifier
+            tx_hash = tx.get("hash")
+            if not tx_hash:
+                logger.warning("Transaction has no hash, skipping")
+                return False
+            
+            # Update or insert transaction
+            self.collection.update_one(
+                {"hash": tx_hash},
+                {"$set": tx},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to store transaction: {e}")
+            return False
+    
+    def get_transactions(self, user_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get transactions from MongoDB.
+        
+        Args:
+            user_id: Filter by user ID (optional)
+            limit: Maximum number of transactions to return
+            
+        Returns:
+            List[Dict]: List of transactions
+        """
+        if not self.collection:
+            logger.error("MongoDB collection not available")
+            return []
+        
+        query = {}
+        if user_id:
+            query["user_id"] = user_id
+        
+        try:
+            return list(self.collection.find(query).limit(limit))
+        except Exception as e:
+            logger.error(f"Failed to get transactions: {e}")
+            return []
+    
+    # User management methods
+    
+    def get_users(self) -> List[Dict[str, Any]]:
+        """
+        Get all users from MongoDB.
+        
+        Returns:
+            List[Dict]: List of users with their wallets
+        """
+        if not self.users_collection:
+            logger.error("MongoDB users collection not available")
+            return []
+        
+        try:
+            return list(self.users_collection.find({}))
+        except Exception as e:
+            logger.error(f"Failed to get users: {e}")
+            return []
+    
+    def add_user(self, user_id: str, wallets: List[str]) -> bool:
+        """
+        Add a new user to MongoDB or update an existing one.
+        
+        Args:
+            user_id: Unique identifier for the user
+            wallets: List of wallet addresses
+            
+        Returns:
+            bool: True if successfully added/updated, False otherwise
+        """
+        if not self.users_collection:
+            logger.error("MongoDB users collection not available")
+            return False
+        
+        try:
+            # Create user document
+            user = {
+                "id": user_id,
+                "wallets": wallets
+            }
+            
+            # Update or insert user
+            self.users_collection.update_one(
+                {"id": user_id},
+                {"$set": user},
+                upsert=True
+            )
+            logger.info(f"Added/updated user: {user_id} with {len(wallets)} wallets")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add/update user {user_id}: {e}")
+            return False
+    
+    def remove_user(self, user_id: str) -> bool:
+        """
+        Remove a user from MongoDB.
+        
+        Args:
+            user_id: Unique identifier for the user
+            
+        Returns:
+            bool: True if successfully removed, False otherwise
+        """
+        if not self.users_collection:
+            logger.error("MongoDB users collection not available")
+            return False
+        
+        try:
+            result = self.users_collection.delete_one({"id": user_id})
+            if result.deleted_count > 0:
+                logger.info(f"Removed user: {user_id}")
+                return True
+            else:
+                logger.warning(f"User {user_id} not found")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to remove user {user_id}: {e}")
+            return False
+    
+    def add_wallet_to_user(self, user_id: str, wallet: str) -> bool:
+        """
+        Add a wallet to an existing user.
+        
+        Args:
+            user_id: Unique identifier for the user
+            wallet: Wallet address to add
+            
+        Returns:
+            bool: True if successfully added, False otherwise
+        """
+        if not self.users_collection:
+            logger.error("MongoDB users collection not available")
+            return False
+        
+        try:
+            # Add wallet to user's wallet list if it doesn't exist
+            result = self.users_collection.update_one(
+                {"id": user_id},
+                {"$addToSet": {"wallets": wallet}}
+            )
+            
+            if result.matched_count > 0:
+                logger.info(f"Added wallet {wallet} to user {user_id}")
+                return True
+            else:
+                logger.warning(f"User {user_id} not found")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to add wallet to user {user_id}: {e}")
+            return False
+    
+    def remove_wallet_from_user(self, user_id: str, wallet: str) -> bool:
+        """
+        Remove a wallet from an existing user.
+        
+        Args:
+            user_id: Unique identifier for the user
+            wallet: Wallet address to remove
+            
+        Returns:
+            bool: True if successfully removed, False otherwise
+        """
+        if not self.users_collection:
+            logger.error("MongoDB users collection not available")
+            return False
+        
+        try:
+            # Remove wallet from user's wallet list
+            result = self.users_collection.update_one(
+                {"id": user_id},
+                {"$pull": {"wallets": wallet}}
+            )
+            
+            if result.matched_count > 0:
+                logger.info(f"Removed wallet {wallet} from user {user_id}")
+                return True
+            else:
+                logger.warning(f"User {user_id} not found")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to remove wallet from user {user_id}: {e}")
+            return False
+    
+    def initialize_default_users(self, default_users: List[Dict[str, Any]]) -> None:
+        """
+        Initialize the users collection with default users if it's empty.
+        
+        Args:
+            default_users: List of default user configurations
+        """
+        if not self.users_collection:
+            logger.error("MongoDB users collection not available")
+            return
+        
+        try:
+            # Check if users collection is empty
+            if self.users_collection.count_documents({}) == 0:
+                logger.info("Initializing users collection with default users")
+                
+                # Insert default users
+                for user in default_users:
+                    self.add_user(user["id"], user["wallets"])
+                
+                logger.info(f"Added {len(default_users)} default users")
+            else:
+                logger.info("Users collection already contains data, skipping initialization")
+        except Exception as e:
+            logger.error(f"Failed to initialize default users: {e}")
+            
+    def verify_db_connection(self) -> bool:
+        """
+        Verify database connection is working and collections exist.
+        
+        Returns:
+            bool: True if connection is verified, False otherwise
+        """
+        try:
+            # Verify connection by pinging the server
+            self.client.admin.command('ping')
+            
+            # Verify collections exist
+            collections = self.db.list_collection_names()
+            has_transactions = self.collection_name in collections
+            has_users = "users" in collections
+            
+            if has_transactions and has_users:
+                logger.info("MongoDB connection and collections verified")
+                return True
+            else:
+                missing = []
+                if not has_transactions:
+                    missing.append(self.collection_name)
+                if not has_users:
+                    missing.append("users")
+                logger.warning(f"Missing collections: {', '.join(missing)}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to verify MongoDB connection: {e}")
+            return False 
