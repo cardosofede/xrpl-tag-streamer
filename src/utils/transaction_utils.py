@@ -7,7 +7,7 @@ import binascii
 import logging
 from typing import Any, Dict, List, Optional, Union
 
-from src.config import TARGET_TAG
+from src.config import SOURCE_TAG
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,13 @@ def has_target_tag(transaction: Dict[str, Any], target_tag: Optional[str] = None
     
     Args:
         transaction: The transaction data
-        target_tag: The tag to look for, defaults to TARGET_TAG from config
+        target_tag: The tag to look for, defaults to SOURCE_TAG from config
         
     Returns:
         bool: True if the transaction has the target tag, False otherwise
     """
-    tag = target_tag or TARGET_TAG
+    # Convert SOURCE_TAG to string for comparison
+    tag = target_tag or str(SOURCE_TAG)
     
     # Check source tag
     if "SourceTag" in transaction and str(transaction["SourceTag"]) == tag:
