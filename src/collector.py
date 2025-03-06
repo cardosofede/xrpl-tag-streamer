@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from xrpl.asyncio.clients import AsyncJsonRpcClient
+from xrpl.models import Tx
 from xrpl.models.requests import AccountTx
 
 from src.config import (
@@ -212,20 +213,14 @@ class XRPLCollector:
             
             # Process each transaction
             matching_count = 0
-            for tx_wrapper in transactions:
-                # Extract transaction object
-                tx = tx_wrapper.get("tx", {})
-                
+            for tx in transactions:
                 # Skip if not a complete transaction
                 if not isinstance(tx, dict) or not tx.get("hash"):
                     continue
-                
-                # Get metadata
-                meta = tx_wrapper.get("meta", {})
-                
-                # Add metadata to transaction
-                tx["meta"] = meta
-                
+
+                tx_request = Tx(transaction=tx.get("hash"))
+
+                tx_details = await self.client.request(tx_request)
                 # Check if this transaction has our source tag
                 tag_matched = has_target_tag(tx, str(self.source_tag))
                 
