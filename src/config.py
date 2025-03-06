@@ -4,8 +4,7 @@ Loads settings from environment variables with sensible defaults.
 """
 
 import os
-from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Any
 
 from dotenv import load_dotenv
 
@@ -16,22 +15,29 @@ load_dotenv()
 XRPL_WS_URL = os.getenv("XRPL_WS_URL", "wss://s.altnet.rippletest.net/")
 XRPL_RPC_URL = os.getenv("XRPL_RPC_URL", "https://s.altnet.rippletest.net:51234/")
 
-# Database Configuration
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
-DUCKDB_PATH = os.getenv("DUCKDB_PATH", str(DATA_DIR / "xrpl_transactions.duckdb"))
+# MongoDB Configuration
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "xrpl_transactions")
+MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "transactions")
 
-# Ensure data directory exists
-DATA_DIR.mkdir(exist_ok=True, parents=True)
+# Collection frequency in seconds
+COLLECTION_FREQUENCY = int(os.getenv("COLLECTION_FREQUENCY", "300"))  # Default: 5 minutes
 
-# Streaming Configuration
-TARGET_TAG = os.getenv("TARGET_TAG", "hummingbot")
-HISTORY_BACKFILL_DAYS = int(os.getenv("HISTORY_BACKFILL_DAYS", "1"))
+# How often to refresh the user configuration from the database (in seconds)
+USER_CONFIG_REFRESH_INTERVAL = int(os.getenv("USER_CONFIG_REFRESH_INTERVAL", "60"))  # Default: 1 minute
+
+# Source tag to filter transactions
+SOURCE_TAG = int(os.getenv("SOURCE_TAG", "19089388"))
+
+# Default user configuration 
+# This is used to initialize the MongoDB users collection if it's empty
+# After initialization, the application will load users from MongoDB
+DEFAULT_USERS = [
+    {
+        "id": "david",
+        "wallets": ["rJtj42u8QPQWcPiwF3B8sNPb2GMo9gmNub"]
+    }
+]
 
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-def get_db_path() -> Path:
-    """Get the path to the DuckDB database file, ensuring parent directory exists."""
-    db_path = Path(DUCKDB_PATH)
-    db_path.parent.mkdir(exist_ok=True, parents=True)
-    return db_path 
