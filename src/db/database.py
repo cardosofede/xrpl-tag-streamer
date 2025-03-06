@@ -113,13 +113,13 @@ class MongoDatabase:
         Store a transaction in MongoDB.
         
         Args:
-            tx: The transaction data
-            user_id: ID of the user who owns the wallet
+            tx: Transaction data
+            user_id: User ID associated with this transaction
             
         Returns:
             bool: True if successfully stored, False otherwise
         """
-        if not self.collection:
+        if self.collection is None:
             logger.error("MongoDB collection not available")
             return False
         
@@ -155,7 +155,7 @@ class MongoDatabase:
         Returns:
             List[Dict]: List of transactions
         """
-        if not self.collection:
+        if self.collection is None:
             logger.error("MongoDB collection not available")
             return []
         
@@ -173,12 +173,12 @@ class MongoDatabase:
     
     def get_users(self) -> List[Dict[str, Any]]:
         """
-        Get all users from MongoDB.
-        
+        Get all users from the database.
+
         Returns:
-            List[Dict]: List of users with their wallets
+            List of user documents
         """
-        if not self.users_collection:
+        if self.users_collection is None:
             logger.error("MongoDB users collection not available")
             return []
         
@@ -190,16 +190,16 @@ class MongoDatabase:
     
     def add_user(self, user_id: str, wallets: List[str]) -> bool:
         """
-        Add a new user to MongoDB or update an existing one.
-        
+        Add a new user with the given ID and wallets.
+
         Args:
-            user_id: Unique identifier for the user
-            wallets: List of wallet addresses
-            
+            user_id: User identifier
+            wallets: List of wallet addresses to track
+
         Returns:
-            bool: True if successfully added/updated, False otherwise
+            True if the user was added successfully, False otherwise
         """
-        if not self.users_collection:
+        if self.users_collection is None:
             logger.error("MongoDB users collection not available")
             return False
         
@@ -224,15 +224,15 @@ class MongoDatabase:
     
     def remove_user(self, user_id: str) -> bool:
         """
-        Remove a user from MongoDB.
-        
+        Remove a user with the given ID.
+
         Args:
-            user_id: Unique identifier for the user
-            
+            user_id: User identifier
+
         Returns:
-            bool: True if successfully removed, False otherwise
+            True if the user was removed successfully, False otherwise
         """
-        if not self.users_collection:
+        if self.users_collection is None:
             logger.error("MongoDB users collection not available")
             return False
         
@@ -251,15 +251,15 @@ class MongoDatabase:
     def add_wallet_to_user(self, user_id: str, wallet: str) -> bool:
         """
         Add a wallet to an existing user.
-        
+
         Args:
-            user_id: Unique identifier for the user
+            user_id: User identifier
             wallet: Wallet address to add
-            
+
         Returns:
-            bool: True if successfully added, False otherwise
+            True if the wallet was added successfully, False otherwise
         """
-        if not self.users_collection:
+        if self.users_collection is None:
             logger.error("MongoDB users collection not available")
             return False
         
@@ -283,15 +283,15 @@ class MongoDatabase:
     def remove_wallet_from_user(self, user_id: str, wallet: str) -> bool:
         """
         Remove a wallet from an existing user.
-        
+
         Args:
-            user_id: Unique identifier for the user
+            user_id: User identifier
             wallet: Wallet address to remove
-            
+
         Returns:
-            bool: True if successfully removed, False otherwise
+            True if the wallet was removed successfully, False otherwise
         """
-        if not self.users_collection:
+        if self.users_collection is None:
             logger.error("MongoDB users collection not available")
             return False
         
@@ -319,7 +319,7 @@ class MongoDatabase:
         Args:
             default_users: List of default user configurations
         """
-        if not self.users_collection:
+        if self.users_collection is None:
             logger.error("MongoDB users collection not available")
             return
         
