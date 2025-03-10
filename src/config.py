@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # XRPL Node Configuration
-XRPL_WS_URL = os.getenv("XRPL_WS_URL", "wss://s.altnet.rippletest.net/")
-XRPL_RPC_URL = os.getenv("XRPL_RPC_URL", "https://s.altnet.rippletest.net:51234/")
+XRPL_WS_URL = os.getenv("XRPL_WS_URL", "https://xrplcluster.com/")
+XRPL_RPC_URL = os.getenv("XRPL_RPC_URL", "https://xrplcluster.com/")
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://wiz-ai:wiz-ai@localhost:27017/")
@@ -28,6 +28,8 @@ USER_CONFIG_REFRESH_INTERVAL = int(os.getenv("USER_CONFIG_REFRESH_INTERVAL", "60
 
 # Source tag to filter transactions
 SOURCE_TAG = int(os.getenv("SOURCE_TAG", "19089388"))
+
+FROM_LEDGER = int(os.getenv("FROM_LEDGER", "94000000"))
 
 # Default user configuration 
 # This is used to initialize the MongoDB users collection if it's empty
