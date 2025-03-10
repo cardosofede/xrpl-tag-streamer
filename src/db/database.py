@@ -144,7 +144,7 @@ class MongoDatabase:
             logger.error(f"Failed to store transaction: {e}")
             return False
     
-    def get_transactions(self, user_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_transactions(self, user_id: Optional[str] = None, wallet: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """
         Get transactions from MongoDB.
         
@@ -162,7 +162,8 @@ class MongoDatabase:
         query = {}
         if user_id:
             query["user_id"] = user_id
-        
+        if wallet:
+            query["$or"] = [{"Account": wallet}, {"Destination": wallet}]
         try:
             return list(self.collection.find(query).limit(limit))
         except Exception as e:
