@@ -5,9 +5,6 @@ Logging configuration for the application.
 import logging
 from typing import Optional
 
-from rich.console import Console
-from rich.logging import RichHandler
-
 from src.config import LOG_LEVEL, DATA_DIR
 
 # Configure the root logger
@@ -45,7 +42,6 @@ def setup_logging(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            RichHandler(rich_tracebacks=True, console=Console(stderr=True)),
             logging.FileHandler(log_file_path),
         ],
     )

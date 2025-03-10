@@ -7,6 +7,15 @@ import binascii
 import logging
 from typing import Any, Dict, List, Optional, Union
 
+from xrpl.utils import (
+    drops_to_xrp,
+    get_balance_changes,
+    get_order_book_changes,
+    hex_to_str,
+    ripple_time_to_posix,
+    xrp_to_drops,
+)
+
 from src.config import SOURCE_TAG
 
 logger = logging.getLogger(__name__)
@@ -128,4 +137,107 @@ def format_transaction_for_display(tx: Dict[str, Any]) -> Dict[str, Any]:
                 
                 result["memos"].append(memo_formatted)
     
-    return result 
+    return result
+
+def is_offer_filled(tx: Dict[str, Any]) -> bool:
+    """
+    Determine if an OfferCreate transaction was filled (completely executed).
+    
+    Args:
+        tx: Transaction data with metadata
+    
+    Returns:
+        bool: True if the offer was completely filled, False otherwise
+    """
+    # Only process OfferCreate transactions
+    if tx.get("TransactionType") != "OfferCreate":
+        return False
+    
+    # Check if transaction was successful
+    meta = tx.get("meta") or tx.get("metaData", {})
+    if meta.get("TransactionResult") != "tesSUCCESS":
+        return False
+    
+    # Look for deleted offer nodes in the affected nodes
+    affected_nodes = meta.get("AffectedNodes", [])
+    for node in affected_nodes:
+        # Check for deleted offer that matches the account
+        if "DeletedNode" in node:
+            deleted_node = node["DeletedNode"]
+            if deleted_node.get("LedgerEntryType") == "Offer":
+                final_fields = deleted_node.get("FinalFields", {})
+                if final_fields.get("Account") == tx.get("Account"):
+                    # Offer was deleted, meaning it was fully filled
+                    return True
+    
+    return False
+
+def enrich_transaction_metadata(tx: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Enrich a transaction with additional metadata-derived information.
+    
+    Args:
+        tx: Transaction data with metadata
+        
+    Returns:
+        Dict: The transaction with additional fields
+    """
+    # Make a copy to avoid modifying the original
+    enriched_tx = tx.copy()
+    
+    # Skip if no metadata
+    meta = tx.get("meta") or tx.get("metaData")
+    if not meta:
+        return enriched_tx
+    
+    # Add transaction result
+    enriched_tx["tx_result"] = meta.get("TransactionResult")
+    
+    # Process OfferCreate transactions
+    if tx.get("TransactionType") == "OfferCreate":
+        enriched_tx["offer_filled"] = is_offer_filled(tx)
+        
+        # Extract offer details
+        if "TakerGets" in tx:
+            taker_gets = tx["TakerGets"]
+            if isinstance(taker_gets, str):
+                # XRP amount in drops
+                enriched_tx["base_currency"] = "XRP"
+                enriched_tx["base_amount"] = drops_to_xrp(taker_gets)
+            elif isinstance(taker_gets, dict):
+                # IOU
+                enriched_tx["base_currency"] = taker_gets.get("currency", "")
+                enriched_tx["base_amount"] = float(taker_gets.get("value", 0))
+                enriched_tx["base_issuer"] = taker_gets.get("issuer", "")
+        
+        if "TakerPays" in tx:
+            taker_pays = tx["TakerPays"]
+            if isinstance(taker_pays, str):
+                # XRP amount in drops
+                enriched_tx["quote_currency"] = "XRP"
+                enriched_tx["quote_amount"] = drops_to_xrp(taker_pays)
+            elif isinstance(taker_pays, dict):
+                # IOU
+                enriched_tx["quote_currency"] = taker_pays.get("currency", "")
+                enriched_tx["quote_amount"] = float(taker_pays.get("value", 0))
+                enriched_tx["quote_issuer"] = taker_pays.get("issuer", "")
+        
+        # For a filled offer, get the actual execution details
+        if enriched_tx.get("offer_filled"):
+            # Try to extract order book changes
+            try:
+                order_changes = get_order_book_changes(tx)
+                if order_changes:
+                    enriched_tx["order_book_changes"] = order_changes
+            except Exception as e:
+                logger.warning(f"Failed to get order book changes: {e}")
+    
+    # Get balance changes for all transaction types
+    try:
+        balance_changes = get_balance_changes(tx)
+        if balance_changes:
+            enriched_tx["balance_changes"] = balance_changes
+    except Exception as e:
+        logger.warning(f"Failed to get balance changes: {e}")
+    
+    return enriched_tx 
