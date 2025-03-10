@@ -17,7 +17,7 @@ from xrpl.models.requests.request import RequestMethod
 
 from src.config import TARGET_TAG, XRPL_WS_URL
 from src.db.database import XRPLDatabase
-from src.utils.transaction_utils import has_target_tag, format_transaction_for_display
+from src.utils.transaction_utils import has_target_tag, format_transaction_for_display, enrich_transaction_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,19 @@ class XRPLStreamer:
                 
                 # Add ledger index to transaction for reference
                 tx["ledger_index"] = ledger_index
+                
+                # Standardize metadata field name
+                if "metaData" in tx and "meta" not in tx:
+                    tx["meta"] = tx["metaData"]
+                
+                # Enrich transaction with metadata analysis
+                enriched_tx = enrich_transaction_metadata(tx)
+                tx.update(enriched_tx)
+                
+                # Log if this is an offer and whether it was filled
+                if tx.get("TransactionType") == "OfferCreate":
+                    filled_status = "FILLED" if enriched_tx.get("offer_filled") else "NOT FILLED"
+                    logger.info(f"OfferCreate transaction {tx.get('hash')} was {filled_status}")
                 
                 # Check if this transaction has our target tag
                 tag_matched = has_target_tag(tx, self.target_tag)
