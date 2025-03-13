@@ -41,6 +41,8 @@ DEFAULT_USERS = [
     }
 ]
 
+# other wallet: rBev9xk8HJJTi4aeLtPjnBMwxnXuHaWaBh
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
