@@ -5,7 +5,8 @@ Logging configuration for the application.
 import logging
 from typing import Optional
 
-from src.config import LOG_LEVEL, DATA_DIR
+from src.config import LOG_LEVEL, DATA_DIR, LOG_DIR
+
 
 # Configure the root logger
 def setup_logging(
@@ -30,7 +31,7 @@ def setup_logging(
     level = getattr(logging, log_level_value.upper())
     
     # Create logs directory if it doesn't exist
-    log_dir = DATA_DIR / "logs"
+    log_dir = LOG_DIR
     log_dir.mkdir(exist_ok=True, parents=True)
     
     # Default log file if not specified

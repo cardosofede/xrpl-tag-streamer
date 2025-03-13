@@ -2,18 +2,14 @@
 Utility functions for processing XRPL transactions.
 """
 
-import base64
 import binascii
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional
 
 from xrpl.utils import (
     drops_to_xrp,
     get_balance_changes,
     get_order_book_changes,
-    hex_to_str,
-    ripple_time_to_posix,
-    xrp_to_drops,
 )
 
 from src.config import SOURCE_TAG
