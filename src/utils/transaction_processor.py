@@ -3,18 +3,27 @@ Transaction processing utilities for XRPL transactions.
 These functions handle analyzing transaction data and extracting relevant information.
 """
 
-from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional, Union
 
-from xrpl.utils import get_balance_changes
-from xrpl.models.response import ResponseStatus
+from xrpl.utils import get_balance_changes, ripple_time_to_datetime, xrp_to_drops, drops_to_xrp
 
 from src.data_types import (
     XRPLAmount, 
     Trade, 
-    TransactionType,
-    OrderStatus
 )
+
+
+def get_transaction_fee(tx: Dict[str, Any]) -> float:
+    """
+    Extract the transaction fee from a transaction.
+    
+    Args:
+        tx: Transaction data
+        
+    Returns:
+        float: Transaction fee in XRP
+    """
+    return float(drops_to_xrp(tx.get("tx_json", {}).get("Fee", "0")))
 
 
 def has_source_tag(tx: Dict[str, Any], target_tag: str) -> bool:
@@ -28,7 +37,8 @@ def has_source_tag(tx: Dict[str, Any], target_tag: str) -> bool:
     Returns:
         bool: True if transaction has the specified source tag
     """
-    source_tag = tx.get("SourceTag") or tx.get("TagSource")
+    tx_json = tx.get("tx_json")
+    source_tag = tx_json.get("SourceTag") or tx_json.get("TagSource")
     if source_tag is not None:
         return str(source_tag) == target_tag
     return False
@@ -45,18 +55,19 @@ def is_deposit_or_withdrawal(tx: Dict[str, Any], user_wallets: List[str]) -> Opt
     Returns:
         str: 'deposit', 'withdrawal', or None if neither
     """
-    if tx.get("TransactionType") != "Payment":
+    tx_json = tx.get("tx_json", {})
+    if tx_json.get("TransactionType") != "Payment":
         return None
         
-    account = tx.get("Account")
-    destination = tx.get("Destination")
+    account = tx_json.get("Account")
+    destination = tx_json.get("Destination")
     
     if account in user_wallets and destination not in user_wallets:
         return "withdrawal"
     elif account not in user_wallets and destination in user_wallets:
         return "deposit"
     
-    return None
+    return "internal_transfer" if account in user_wallets and destination in user_wallets else None
 
 
 def is_offer_filled(tx: Dict[str, Any]) -> bool:
@@ -69,7 +80,8 @@ def is_offer_filled(tx: Dict[str, Any]) -> bool:
     Returns:
         bool: True if offer was filled
     """
-    if tx.get("TransactionType") != "OfferCreate":
+    tx_json = tx.get("tx_json", {})
+    if tx_json.get("TransactionType") != "OfferCreate":
         return False
         
     meta = tx.get("meta") or tx.get("metaData", {})
@@ -81,17 +93,28 @@ def is_offer_filled(tx: Dict[str, Any]) -> bool:
     if result != "tesSUCCESS":
         return False
     
+    # Get the transaction fee
+    fee = get_transaction_fee(tx)
+    
     # Get balance changes to determine if the offer was filled
     try:
         balance_changes = get_balance_changes(meta)
         
         # If there are balance changes for the account, the offer was at least partially filled
-        account = tx.get("Account")
-        for acct, changes in balance_changes.items():
-            if acct == account and len(changes) > 0:
-                return True
+        # BUT we need to exclude changes that are only due to transaction fees
+        account = tx_json.get("Account")
         
-        # If there's no balance change, check if an offer was created
+        # Check if there are non-fee balance changes for the account
+        for balance_change in balance_changes:
+            if balance_change["account"] == account:
+                # Skip XRP changes that match the transaction fee
+                for change in balance_change["balances"]:
+                    if change["currency"] == "XRP" and abs(float(change["value"]) + fee) < 0.000001:
+                        continue
+                    # Any other change means the offer was filled
+                    return True
+        
+        # If there's no non-fee balance change, check if an offer was created
         affected_nodes = meta.get("AffectedNodes", [])
         for node in affected_nodes:
             if "CreatedNode" in node:
@@ -130,7 +153,8 @@ def is_market_trade(tx: Dict[str, Any]) -> bool:
     Returns:
         bool: True if payment is a market trade
     """
-    if tx.get("TransactionType") != "Payment":
+    tx_json = tx.get("tx_json", {})
+    if tx_json.get("TransactionType") != "Payment":
         return False
         
     meta = tx.get("meta") or tx.get("metaData", {})
@@ -148,14 +172,15 @@ def is_market_trade(tx: Dict[str, Any]) -> bool:
         balance_changes = get_balance_changes(meta)
         
         # For the sender account, check if there are multiple currency changes
-        account = tx.get("Account")
+        account = tx_json.get("Account")
         if account in balance_changes:
             currencies = set()
             for change in balance_changes[account]:
                 currencies.add(change["currency"])
             
             # If the sender has balance changes in multiple currencies, it's likely a market trade
-            if len(currencies) > 1:
+            # But we need at least one non-XRP currency (since XRP will always change due to fees)
+            if len(currencies) > 1 or (len(currencies) == 1 and next(iter(currencies)) != "XRP"):
                 return True
                 
         # Also check if any offer nodes were affected
@@ -195,38 +220,19 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
     if not meta or isinstance(meta, str):
         return trades
     
+    tx_json = tx.get("tx_json", {})
     tx_hash = tx.get("hash")
     ledger_index = tx.get("ledger_index")
-    timestamp = datetime.fromtimestamp(tx.get("date", 0))
-    taker_address = tx.get("Account")
+    timestamp = ripple_time_to_datetime(tx_json.get("date", 0))
+    taker_address = tx_json.get("Account")
     
     try:
         # Get balance changes for all affected accounts
         balance_changes = get_balance_changes(meta)
         
-        # First, identify the taker's changes (what they sold and bought)
-        taker_sold = None
-        taker_bought = None
-        
-        if taker_address in balance_changes:
-            for change in balance_changes[taker_address]:
-                # Negative changes are assets sold
-                if float(change["value"]) < 0:
-                    taker_sold = XRPLAmount(
-                        currency=change["currency"],
-                        issuer=change.get("issuer"),
-                        value=str(abs(float(change["value"])))
-                    )
-                # Positive changes are assets bought
-                elif float(change["value"]) > 0:
-                    taker_bought = XRPLAmount(
-                        currency=change["currency"],
-                        issuer=change.get("issuer"),
-                        value=change["value"]
-                    )
-        
         # Now look for matching changes in other accounts (the makers)
-        for maker_address, changes in balance_changes.items():
+        for balance_change in balance_changes:
+            maker_address = balance_change["account"]
             # Skip the taker's own account
             if maker_address == taker_address:
                 continue
@@ -235,22 +241,29 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
             maker_sold = None
             maker_bought = None
             
-            for change in changes:
+            for change in balance_change["balances"]:
+                change_value = float(change["value"])
                 # Positive changes are assets the maker bought
-                if float(change["value"]) > 0:
+                if change_value > 0:
                     maker_bought = XRPLAmount(
                         currency=change["currency"],
                         issuer=change.get("issuer"),
                         value=change["value"]
                     )
                 # Negative changes are assets the maker sold
-                elif float(change["value"]) < 0:
+                elif change_value < 0:
                     maker_sold = XRPLAmount(
                         currency=change["currency"],
                         issuer=change.get("issuer"),
-                        value=str(abs(float(change["value"])))
+                        value=str(abs(change_value))
                     )
-            
+            related_offer_sequence = None
+            for node_affected in meta.get("AffectedNodes", []):
+                key = next(iter(node_affected))
+                value = node_affected.get(key)
+                if key in ["DeletedNode", "ModifiedNode"] and value["LedgerEntryType"] == "Offer":
+                    related_offer_sequence = node_affected["FinalFields"]["Sequence"]
+                    break
             # If we have both what the maker sold and bought, create a trade
             if maker_sold and maker_bought:
                 trades.append(Trade(
@@ -260,7 +273,8 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
                     taker_address=taker_address,
                     maker_address=maker_address,
                     sold_amount=maker_sold,  # What the maker sold
-                    bought_amount=maker_bought  # What the maker bought
+                    bought_amount=maker_bought,  # What the maker bought
+                    related_offer_sequence=related_offer_sequence
                 ))
         
         # If no trades were found with the above method but we know a trade occurred,
@@ -291,10 +305,11 @@ def _extract_trades_from_affected_nodes(tx: Dict[str, Any]) -> List[Trade]:
         return trades
         
     affected_nodes = meta.get("AffectedNodes", [])
+    tx_json = tx.get("tx_json", {})
     tx_hash = tx.get("hash")
     ledger_index = tx.get("ledger_index")
-    timestamp = datetime.fromtimestamp(tx.get("date", 0))
-    taker_address = tx.get("Account")
+    timestamp = ripple_time_to_datetime(tx_json.get("date", 0))
+    taker_address = tx_json.get("Account")
     
     for node in affected_nodes:
         if "DeletedNode" in node or "ModifiedNode" in node:
@@ -392,11 +407,12 @@ def extract_amount(tx: Dict[str, Any]) -> XRPLAmount:
     Returns:
         XRPLAmount: The transaction amount
     """
-    amount = tx.get("Amount")
+    tx_json = tx.get("tx_json", {})
+    amount = tx_json.get("Amount")
     return XRPLAmount.from_xrpl_amount(amount) if amount else XRPLAmount(currency="UNKNOWN", value="0")
 
 
-def extract_transaction_balance_changes(tx: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+def extract_transaction_balance_changes(tx: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Extract all balance changes from a transaction using the XRPL utility function.
     
@@ -404,17 +420,18 @@ def extract_transaction_balance_changes(tx: Dict[str, Any]) -> Dict[str, List[Di
         tx: Transaction data
         
     Returns:
-        Dict[str, List[Dict[str, Any]]]: Dictionary of account address to list of balance changes
+        List[Dict[str, Any]]: List of balance changes, each with 'account' and 'balances' keys
+                             where 'balances' is a list of currency changes
     """
     meta = tx.get("meta") or tx.get("metaData", {})
     
     if not meta or isinstance(meta, str):
-        return {}
+        return []
     
     try:
         return get_balance_changes(meta)
     except Exception as e:
-        return {}
+        return []
 
 
 def analyze_transaction(tx: Dict[str, Any], user_wallets: List[str]) -> Dict[str, Any]:
@@ -428,8 +445,13 @@ def analyze_transaction(tx: Dict[str, Any], user_wallets: List[str]) -> Dict[str
     Returns:
         Dict[str, Any]: Transaction with additional analysis metadata
     """
-    tx_type = tx.get("TransactionType")
+    tx_json = tx.get("tx_json", {})
+    tx_type = tx_json.get("TransactionType")
     enriched_tx = tx.copy()
+    
+    # Extract fee information
+    enriched_tx["fee_xrp"] = get_transaction_fee(tx)
+    enriched_tx["tx_type"] = tx_type
     
     # Extract balance changes for all transaction types
     balance_changes = extract_transaction_balance_changes(tx)
@@ -440,6 +462,10 @@ def analyze_transaction(tx: Dict[str, Any], user_wallets: List[str]) -> Dict[str
         enriched_tx["offer_filled"] = is_offer_filled(tx)
         if enriched_tx["offer_filled"]:
             enriched_tx["trades"] = extract_trades_from_metadata(tx)
+        # Find which offer is being canceled
+        offer_sequence = tx_json.get("OfferSequence")
+        if offer_sequence:
+            enriched_tx["canceled_offer_sequence"] = offer_sequence
     
     elif tx_type == "Payment":
         tx_nature = is_deposit_or_withdrawal(tx, user_wallets)
@@ -451,7 +477,7 @@ def analyze_transaction(tx: Dict[str, Any], user_wallets: List[str]) -> Dict[str
     
     elif tx_type == "OfferCancel":
         # Find which offer is being canceled
-        offer_sequence = tx.get("OfferSequence")
+        offer_sequence = tx_json.get("OfferSequence")
         if offer_sequence:
             enriched_tx["canceled_offer_sequence"] = offer_sequence
     
