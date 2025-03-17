@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from xrpl.asyncio.clients import AsyncJsonRpcClient
-from xrpl.models.requests import AccountTx, AccountOffers
+from xrpl.models.requests import AccountTx, AccountOffers, Tx
+from xrpl.utils import ripple_time_to_datetime
 
 from src.config import (
     XRPL_RPC_URL,
@@ -37,7 +38,9 @@ from src.utils.transaction_processor import (
     is_offer_filled,
     is_market_trade,
     extract_trades_from_metadata,
-    extract_amount
+    extract_amount,
+    extract_transaction_balance_changes,
+    get_transaction_fee
 )
 
 logger = logging.getLogger(__name__)
@@ -309,8 +312,12 @@ class XRPLCollector:
             "sequence": order.get("sequence") or order.get("Sequence"),
             "created_ledger_index": order.get("created_ledger_index"),
             "resolved_ledger_index": order.get("last_checked_ledger"),
+            # Keep the original taker_gets and taker_pays values from the open order
             "taker_gets": order.get("taker_gets") or order.get("TakerGets"),
             "taker_pays": order.get("taker_pays") or order.get("TakerPays"),
+            # For inferred fills, we assume it was fully filled (we don't have precise data)
+            "filled_gets": order.get("taker_gets") or order.get("TakerGets"),
+            "filled_pays": order.get("taker_pays") or order.get("TakerPays"),
             "status": "filled",
             "user_id": order.get("user_id"),
             "transaction_type": order.get("transaction_type") or "OfferCreate",
@@ -366,21 +373,10 @@ class XRPLCollector:
                 logger.info(f"Processing {len(transactions)} transactions for wallet {address}")
 
                 # Process each transaction following the pipeline approach
-                for tx_info in transactions:
-                    # Extract the main transaction from the response format
-                    tx = tx_info.get("tx_json", tx_info.get("tx", {}))
-                    
+                for tx in transactions:
                     # Skip if not a complete transaction
-                    if not tx or not tx.get("hash"):
+                    if not tx.get("hash"):
                         continue
-                    
-                    # Ensure we have metadata
-                    if "meta" not in tx and "metaData" in tx_info:
-                        tx["meta"] = tx_info["metaData"]
-                    
-                    # Add ledger index if not present
-                    if "ledger_index" not in tx:
-                        tx["ledger_index"] = tx_info.get("ledger_index", 0)
                     
                     # Store the raw transaction and get the enriched version
                     await self._process_transaction(tx, user_id)
@@ -408,41 +404,45 @@ class XRPLCollector:
         """
         # First enrich the transaction with additional analysis, including balance changes
         enriched_tx = analyze_transaction(tx, self.user_wallets.get(user_id, []))
-        
+
+        # Process based on transaction type
+        tx_json = tx.get("tx_json", {})
+        tx_type = tx_json.get("TransactionType")
+
         # Store raw transaction in database if it has our tag
         has_tag = has_source_tag(tx, str(self.source_tag))
-        if has_tag:
+        if has_tag or tx_type == "OfferCancel":
             self.db.store_transaction(enriched_tx, user_id)
             logger.info(f"Stored transaction {tx.get('hash')} for user {user_id}")
-        
-        # Process based on transaction type
-        tx_type = tx.get("TransactionType")
-        
+
         if tx_type == "Payment":
             # Check if this is a deposit/withdrawal or market trade
-            deposit_withdrawal_type = is_deposit_or_withdrawal(tx, self.user_wallets.get(user_id, []))
-            
-            if deposit_withdrawal_type:
+            if enriched_tx["transaction_nature"] in ["deposit", "withdrawal", "internal_transfer"]:
                 # Process as deposit or withdrawal
-                self._process_deposit_withdrawal(enriched_tx, user_id, deposit_withdrawal_type)
+                self._process_deposit_withdrawal(enriched_tx, user_id)
             elif is_market_trade(tx):
-                # Process as market trade
-                self._process_market_trade(enriched_tx, user_id)
-        
+                # Check if this payment filled one of our offers
+                if self._is_payment_filling_our_offer(tx, user_id):
+                    # Process as market trade that filled our offer
+                    await self._process_offer_filled_by_payment(tx, user_id)
+                else:
+                    # Process as regular market trade
+                    self._process_market_trade(enriched_tx, user_id)
+
         elif tx_type == "OfferCreate":
             # Check if the offer was filled immediately or not
-            if is_offer_filled(tx):
+            if enriched_tx["offer_filled"]:
                 # Process as filled offer
                 self._process_filled_offer(enriched_tx, user_id)
             else:
                 # Process as open offer
                 self._process_open_offer(enriched_tx, user_id)
-        
+
         elif tx_type == "OfferCancel":
             # Process offer cancellation
             self._process_offer_cancel(enriched_tx, user_id)
     
-    def _process_deposit_withdrawal(self, tx: Dict[str, Any], user_id: str, tx_type: str) -> None:
+    def _process_deposit_withdrawal(self, tx: Dict[str, Any], user_id: str) -> None:
         """
         Process a deposit or withdrawal transaction.
         
@@ -451,48 +451,60 @@ class XRPLCollector:
             user_id: The user ID
             tx_type: "deposit" or "withdrawal"
         """
+        tx_type = tx.get("transaction_nature")
+        balance_changes = tx.get("balance_changes", [])
+        tx_json = tx.get("tx_json", {})
+        fee_xrp = tx.get("fee_xrp", 0.0)
+
         logger.info(f"Processing {tx_type} transaction {tx.get('hash')}")
-        
-        # Use balance changes to extract the exact amount if available
-        amount = extract_amount(tx)
-        balance_changes = tx.get("balance_changes", {})
-        
+
         # If we have balance changes, use those for more accurate amount
         if balance_changes:
-            account = tx.get("Account")
-            destination = tx.get("Destination")
+            account = tx_json.get("Account")
+            destination = tx_json.get("Destination")
             target_account = destination if tx_type == "deposit" else account
             
-            if target_account in balance_changes:
-                for change in balance_changes[target_account]:
-                    # For deposits, we want positive changes; for withdrawals, negative changes
-                    change_value = float(change["value"])
-                    if (tx_type == "deposit" and change_value > 0) or (tx_type == "withdrawal" and change_value < 0):
-                        amount = XRPLAmount(
-                            currency=change["currency"],
-                            issuer=change.get("issuer"),
-                            value=str(abs(change_value))
-                        )
-                        break
+            for balance_change in balance_changes:
+                if balance_change["account"] == target_account:
+                    for change in balance_change["balances"]:
+                        # For deposits, we want positive changes; for withdrawals, negative changes
+                        change_value = float(change["value"])
+                        
+                        # Skip XRP changes that match the transaction fee
+                        if change["currency"] == "XRP" and tx_type == "withdrawal" and abs(change_value + fee_xrp) < 0.000001:
+                            continue
+                            
+                        if (tx_type == "deposit" and change_value > 0) or (tx_type == "withdrawal" and change_value < 0):
+                            if change["currency"] == "XRP" and tx_type == "withdrawal":
+                                value = abs(change_value) - fee_xrp
+                            else:
+                                value = abs(change_value)
+                            amount = XRPLAmount(
+                                currency=change["currency"],
+                                issuer=change.get("issuer"),
+                                value=str(value)
+                            )
+                            break
         
         # Create deposit/withdrawal record
         deposit_withdrawal = DepositWithdrawal(
             hash=tx.get("hash"),
             ledger_index=tx.get("ledger_index"),
-            timestamp=datetime.fromtimestamp(tx.get("date", 0)),
-            from_address=tx.get("Account"),
-            to_address=tx.get("Destination"),
+            timestamp=ripple_time_to_datetime(tx_json.get("date", 0)),
+            from_address=tx_json.get("Account"),
+            to_address=tx_json.get("Destination"),
             amount=amount,
             type=tx_type,
-            user_id=user_id
+            user_id=user_id,
+            fee_xrp=fee_xrp if tx_type != "deposit" else 0,
         )
         
         # Store in database
-        self.db.store_deposit_withdrawal(deposit_withdrawal.dict())
+        self.db.store_deposit_withdrawal(deposit_withdrawal.model_dump())
     
     def _process_market_trade(self, tx: Dict[str, Any], user_id: str) -> None:
         """
-        Process a market trade (payment that consumed offers).
+        Process a market trade (cross-currency payment).
         
         Args:
             tx: The transaction data
@@ -501,32 +513,40 @@ class XRPLCollector:
         logger.info(f"Processing market trade transaction {tx.get('hash')}")
         
         # Extract trades from metadata, which now uses balance changes
-        trades = extract_trades_from_metadata(tx)
+        trades = tx.get("trades", [])
         
         # Get balance changes to determine what was bought and sold
-        balance_changes = tx.get("balance_changes", {})
-        account = tx.get("Account")
+        balance_changes = tx.get("balance_changes", [])
+        tx_json = tx.get("tx_json", {})
+        account = tx_json.get("Account")
+        fee_xrp = tx_json.get("fee_xrp", 0.0)
+        tx_type = tx_json.get("TransactionType")
         
-        # Initialize sold and bought amounts
+        # Initialize sold and bought amounts (for filled amounts)
         sold_amount = None
         bought_amount = None
         
         # If we have balance changes, use those to determine what was traded
-        if balance_changes and account in balance_changes:
-            for change in balance_changes[account]:
-                change_value = float(change["value"])
-                if change_value < 0:  # Negative change means the account sold this asset
-                    sold_amount = XRPLAmount(
-                        currency=change["currency"],
-                        issuer=change.get("issuer"),
-                        value=str(abs(change_value))
-                    )
-                elif change_value > 0:  # Positive change means the account bought this asset
-                    bought_amount = XRPLAmount(
-                        currency=change["currency"],
-                        issuer=change.get("issuer"),
-                        value=change["value"]
-                    )
+        for balance_change in balance_changes:
+            if balance_change["account"] == account:
+                for change in balance_change["balances"]:
+                    # Skip XRP changes that match the transaction fee
+                    if change["currency"] == "XRP" and abs(float(change["value"]) + fee_xrp) < 0.000001:
+                        continue
+                        
+                    change_value = float(change["value"])
+                    if change_value < 0:  # Negative change means the account sold this asset
+                        sold_amount = XRPLAmount(
+                            currency=change["currency"],
+                            issuer=change.get("issuer"),
+                            value=str(abs(change_value))
+                        )
+                    elif change_value > 0:  # Positive change means the account bought this asset
+                        bought_amount = XRPLAmount(
+                            currency=change["currency"],
+                            issuer=change.get("issuer"),
+                            value=change["value"]
+                        )
         
         # If we couldn't determine from balance changes, use the transaction amount as a fallback
         if not sold_amount or not bought_amount:
@@ -536,25 +556,33 @@ class XRPLCollector:
                 sold_amount = amount
                 bought_amount = amount  # This is a simplification; bought amount might be different
         
+        # For Payment transactions, the original amount is in the tx_json
+        original_amount = extract_amount(tx)
+        
         # Create filled order record for the market trade
         filled_order = FilledOrder(
             hash=tx.get("hash"),
-            account=tx.get("Account"),
-            sequence=tx.get("Sequence", 0),
+            account=tx_json.get("Account"),
+            sequence=tx_json.get("Sequence", 0),
             created_ledger_index=tx.get("ledger_index"),
             resolved_ledger_index=tx.get("ledger_index"),
-            taker_gets=sold_amount or extract_amount(tx),  # Amount being sold
-            taker_pays=bought_amount or extract_amount(tx),  # Amount being bought
+            # For Payment transactions, set these based on the Amount field
+            taker_gets=original_amount,  # Original amount specified in the payment
+            taker_pays=original_amount,  # For payments, we don't know the original expected amount
+            # Set filled amounts based on balance changes
+            filled_gets=sold_amount,  # What was actually sold
+            filled_pays=bought_amount,  # What was actually bought
             status=OrderStatus.FILLED,
             user_id=user_id,
             transaction_type=TransactionType.PAYMENT,
-            created_date=datetime.fromtimestamp(tx.get("date", 0)),
-            resolution_date=datetime.fromtimestamp(tx.get("date", 0)),
-            trades=trades
+            created_date=ripple_time_to_datetime(tx_json.get("date", 0)),
+            resolution_date=ripple_time_to_datetime(tx_json.get("date", 0)),
+            trades=trades,
+            fee_xrp=fee_xrp  # Include fee information
         )
         
         # Store in database
-        self.db.store_filled_order(filled_order.dict())
+        self.db.store_filled_order(filled_order.model_dump())
     
     def _process_open_offer(self, tx: Dict[str, Any], user_id: str) -> None:
         """
@@ -566,23 +594,26 @@ class XRPLCollector:
         """
         logger.info(f"Processing open offer transaction {tx.get('hash')}")
         
+        tx_json = tx.get("tx_json", {})
+
         # Create open order record
         open_order = OpenOrder(
             hash=tx.get("hash"),
-            account=tx.get("Account"),
-            sequence=tx.get("Sequence"),
+            account=tx_json.get("Account"),
+            sequence=tx_json.get("Sequence"),
             created_ledger_index=tx.get("ledger_index"),
             last_checked_ledger=tx.get("ledger_index"),
-            taker_gets=XRPLAmount.from_xrpl_amount(tx.get("TakerGets")),
-            taker_pays=XRPLAmount.from_xrpl_amount(tx.get("TakerPays")),
+            taker_gets=XRPLAmount.from_xrpl_amount(tx_json.get("TakerGets")),
+            taker_pays=XRPLAmount.from_xrpl_amount(tx_json.get("TakerPays")),
             status=OrderStatus.OPEN,
             user_id=user_id,
             transaction_type=TransactionType.OFFER_CREATE,
-            created_date=datetime.fromtimestamp(tx.get("date", 0))
+            created_date=ripple_time_to_datetime(tx_json.get("date", 0)),
+            fee_xrp=tx.get("fee_xrp")  # Include fee information
         )
         
         # Store in database
-        self.db.store_open_order(open_order.dict())
+        self.db.store_open_order(open_order.model_dump())
     
     def _process_filled_offer(self, tx: Dict[str, Any], user_id: str) -> None:
         """
@@ -598,53 +629,64 @@ class XRPLCollector:
         trades = extract_trades_from_metadata(tx)
         
         # Get balance changes to determine what was bought and sold
-        balance_changes = tx.get("balance_changes", {})
-        account = tx.get("Account")
+        balance_changes = tx.get("balance_changes", [])
+        tx_json = tx.get("tx_json", {})
+        account = tx_json.get("Account")
+        fee_xrp = get_transaction_fee(tx)
         
         # Initialize filled amounts
         filled_gets = None
         filled_pays = None
         
         # If we have balance changes, use those to determine what was filled
-        if balance_changes and account in balance_changes:
-            for change in balance_changes[account]:
-                change_value = float(change["value"])
-                # In a filled offer, negative changes correspond to TakerGets (what was sold)
-                if change_value < 0:
-                    filled_gets = XRPLAmount(
-                        currency=change["currency"],
-                        issuer=change.get("issuer"),
-                        value=str(abs(change_value))
-                    )
-                # Positive changes correspond to TakerPays (what was bought)
-                elif change_value > 0:
-                    filled_pays = XRPLAmount(
-                        currency=change["currency"],
-                        issuer=change.get("issuer"),
-                        value=change["value"]
-                    )
+        for balance_change in balance_changes:
+            if balance_change["account"] == account:
+                for change in balance_change["balances"]:
+                    # Skip XRP changes that match the transaction fee
+                    if change["currency"] == "XRP" and abs(float(change["value"]) + fee_xrp) < 0.000001:
+                        continue
+                    
+                    change_value = float(change["value"])
+                    # In a filled offer, negative changes correspond to TakerGets (what was sold)
+                    if change_value < 0:
+                        filled_gets = XRPLAmount(
+                            currency=change["currency"],
+                            issuer=change.get("issuer"),
+                            value=str(abs(change_value))
+                        )
+                    # Positive changes correspond to TakerPays (what was bought)
+                    elif change_value > 0:
+                        filled_pays = XRPLAmount(
+                            currency=change["currency"],
+                            issuer=change.get("issuer"),
+                            value=change["value"]
+                        )
         
-        # Create filled order record
+        # Create filled order record with original taker_gets and taker_pays from tx_json
+        # and the actual filled_gets and filled_pays from balance changes
         filled_order = FilledOrder(
             hash=tx.get("hash"),
-            account=tx.get("Account"),
-            sequence=tx.get("Sequence"),
+            account=tx_json.get("Account"),
+            sequence=tx_json.get("Sequence"),
             created_ledger_index=tx.get("ledger_index"),
             resolved_ledger_index=tx.get("ledger_index"),
-            taker_gets=XRPLAmount.from_xrpl_amount(tx.get("TakerGets")),
-            taker_pays=XRPLAmount.from_xrpl_amount(tx.get("TakerPays")),
-            filled_gets=filled_gets,  # What was actually filled (sold)
-            filled_pays=filled_pays,  # What was actually filled (bought)
+            # Use original offer values from tx_json
+            taker_gets=XRPLAmount.from_xrpl_amount(tx_json.get("TakerGets")),
+            taker_pays=XRPLAmount.from_xrpl_amount(tx_json.get("TakerPays")),
+            # Use filled values from balance changes
+            filled_gets=filled_gets,
+            filled_pays=filled_pays,
             status=OrderStatus.FILLED,
             user_id=user_id,
             transaction_type=TransactionType.OFFER_CREATE,
-            created_date=datetime.fromtimestamp(tx.get("date", 0)),
-            resolution_date=datetime.fromtimestamp(tx.get("date", 0)),
-            trades=trades
+            created_date=ripple_time_to_datetime(tx_json.get("date", 0)),
+            resolution_date=ripple_time_to_datetime(tx_json.get("date", 0)),
+            trades=trades,
+            fee_xrp=fee_xrp
         )
         
         # Store in database
-        self.db.store_filled_order(filled_order.dict())
+        self.db.store_filled_order(filled_order.model_dump())
     
     def _process_offer_cancel(self, tx: Dict[str, Any], user_id: str) -> None:
         """
@@ -657,8 +699,10 @@ class XRPLCollector:
         logger.info(f"Processing offer cancel transaction {tx.get('hash')}")
         
         # Find the open order that matches the sequence number
-        account = tx.get("Account")
-        offer_sequence = tx.get("OfferSequence")
+        tx_json = tx.get("tx_json", {})
+        account = tx_json.get("Account")
+        offer_sequence = tx_json.get("OfferSequence")
+        cancel_fee_xrp = get_transaction_fee(tx)
         
         if not account or not offer_sequence:
             logger.warning(f"Cannot process OfferCancel without Account and OfferSequence: {tx.get('hash')}")
@@ -671,26 +715,240 @@ class XRPLCollector:
             logger.warning(f"Open order not found for account {account}, sequence {offer_sequence}")
             return
         
-        # Create filled order record with canceled status
+        # Check if the order was partially filled
+        meta = tx.get("meta") or tx.get("metaData", {})
+        affected_nodes = meta.get("AffectedNodes", [])
+        is_partially_filled = False
+        
+        for node in affected_nodes:
+            if "ModifiedNode" in node:
+                node_data = node.get("ModifiedNode", {})
+                if node_data.get("LedgerEntryType") == "Offer":
+                    # If there are changes to TakerGets or TakerPays, the order was partially filled
+                    if "PreviousFields" in node_data and "FinalFields" in node_data:
+                        prev_fields = node_data["PreviousFields"]
+                        final_fields = node_data["FinalFields"]
+                        if ("TakerGets" in prev_fields and "TakerGets" in final_fields) or \
+                           ("TakerPays" in prev_fields and "TakerPays" in final_fields):
+                            is_partially_filled = True
+                            break
+        
+        if is_partially_filled:
+            # Process as filled order with partial fill
+            self._process_partially_filled_order(open_order, tx, user_id, cancel_fee_xrp)
+        else:
+            # Process as canceled order
+            self._process_canceled_order(open_order, tx, user_id, cancel_fee_xrp)
+
+    def _process_partially_filled_order(self, open_order: Dict[str, Any], cancel_tx: Dict[str, Any], user_id: str, cancel_fee_xrp: float) -> None:
+        """
+        Process a partially filled order that was canceled.
+        
+        Args:
+            open_order: The original open order
+            cancel_tx: The cancel transaction
+            user_id: The user ID
+            cancel_fee_xrp: Fee for the cancel transaction
+        """
+        # Calculate filled amounts from the modified node
+        meta = cancel_tx.get("meta") or cancel_tx.get("metaData", {})
+        affected_nodes = meta.get("AffectedNodes", [])
+        
+        filled_gets = None
+        filled_pays = None
+        
+        for node in affected_nodes:
+            if "ModifiedNode" in node:
+                node_data = node.get("ModifiedNode", {})
+                if node_data.get("LedgerEntryType") == "Offer":
+                    prev_fields = node_data.get("PreviousFields", {})
+                    final_fields = node_data.get("FinalFields", {})
+                    
+                    # Calculate filled amounts as the difference
+                    if "TakerGets" in prev_fields and "TakerGets" in final_fields:
+                        filled_gets = calculate_amount_difference(
+                            prev_fields["TakerGets"],
+                            final_fields["TakerGets"]
+                        )
+                    
+                    if "TakerPays" in prev_fields and "TakerPays" in final_fields:
+                        filled_pays = calculate_amount_difference(
+                            prev_fields["TakerPays"],
+                            final_fields["TakerPays"]
+                        )
+        
+        # Create filled order record
         filled_order = FilledOrder(
             hash=open_order.get("hash"),
-            account=account,
-            sequence=offer_sequence,
+            account=open_order.get("account"),
+            sequence=open_order.get("sequence"),
             created_ledger_index=open_order.get("created_ledger_index"),
-            resolved_ledger_index=tx.get("ledger_index"),
+            resolved_ledger_index=cancel_tx.get("ledger_index"),
             taker_gets=XRPLAmount.from_xrpl_amount(open_order.get("taker_gets")),
             taker_pays=XRPLAmount.from_xrpl_amount(open_order.get("taker_pays")),
-            status=OrderStatus.CANCELED,
+            filled_gets=filled_gets,
+            filled_pays=filled_pays,
+            status=OrderStatus.PARTIALLY_FILLED,
             user_id=user_id,
             transaction_type=TransactionType.OFFER_CREATE,
-            created_date=datetime.fromtimestamp(open_order.get("created_date", 0)),
-            resolution_date=datetime.fromtimestamp(tx.get("date", 0)),
-            cancel_tx_hash=tx.get("hash")
+            created_date=open_order.get("created_date"),
+            resolution_date=ripple_time_to_datetime(cancel_tx.get("tx_json", {}).get("date", 0)),
+            cancel_tx_hash=cancel_tx.get("hash"),
+            fee_xrp=open_order.get("fee_xrp", 0.0) + cancel_fee_xrp  # Total fees
         )
         
         # Store in database and remove from open orders
-        self.db.store_filled_order(filled_order.dict())
+        self.db.store_filled_order(filled_order.model_dump())
         self.db.delete_open_order(open_order.get("hash"))
+
+    def _process_canceled_order(self, open_order: Dict[str, Any], cancel_tx: Dict[str, Any], user_id: str, cancel_fee_xrp: float) -> None:
+        """
+        Process a canceled order that was not filled.
+        
+        Args:
+            open_order: The original open order
+            cancel_tx: The cancel transaction
+            user_id: The user ID
+            cancel_fee_xrp: Fee for the cancel transaction
+        """
+        # Create canceled order record
+        canceled_order = CanceledOrder(
+            hash=open_order.get("hash"),
+            account=open_order.get("account"),
+            sequence=open_order.get("sequence"),
+            created_ledger_index=open_order.get("created_ledger_index"),
+            canceled_ledger_index=cancel_tx.get("ledger_index"),
+            taker_gets=XRPLAmount.from_xrpl_amount(open_order.get("taker_gets")),
+            taker_pays=XRPLAmount.from_xrpl_amount(open_order.get("taker_pays")),
+            user_id=user_id,
+            transaction_type=TransactionType.OFFER_CREATE,
+            created_date=open_order.get("created_date"),
+            canceled_date=ripple_time_to_datetime(cancel_tx.get("tx_json", {}).get("date", 0)),
+            cancel_tx_hash=cancel_tx.get("hash"),
+            create_fee_xrp=open_order.get("fee_xrp", 0.0),
+            cancel_fee_xrp=cancel_fee_xrp,
+            total_fee_xrp=open_order.get("fee_xrp", 0.0) + cancel_fee_xrp
+        )
+        
+        # Store in database and remove from open orders
+        self.db.store_canceled_order(canceled_order.model_dump())
+        self.db.delete_open_order(open_order.get("hash"))
+
+    def _is_payment_filling_our_offer(self, tx: Dict[str, Any], user_id: str) -> bool:
+        """
+        Check if a payment transaction is filling one of our offers.
+        
+        Args:
+            tx: Transaction data
+            user_id: User ID
+            
+        Returns:
+            bool: True if payment is filling one of our offers
+        """
+        meta = tx.get("meta") or tx.get("metaData", {})
+        if not meta or isinstance(meta, str):
+            return False
+            
+        # Get affected nodes
+        affected_nodes = meta.get("AffectedNodes", [])
+        
+        # Look for modified or deleted offer nodes
+        for node in affected_nodes:
+            if "DeletedNode" in node or "ModifiedNode" in node:
+                node_data = node.get("DeletedNode") or node.get("ModifiedNode", {})
+                if node_data.get("LedgerEntryType") == "Offer":
+                    # Get the offer owner
+                    offer_owner = node_data.get("FinalFields", {}).get("Account")
+                    if offer_owner in self.user_wallets.get(user_id, []):
+                        return True
+        return False
+
+    async def _process_offer_filled_by_payment(self, tx: Dict[str, Any], user_id: str) -> None:
+        """
+        Process a payment transaction that filled one of our offers.
+        
+        Args:
+            tx: Transaction data
+            user_id: User ID
+        """
+        logger.info(f"Processing payment that filled our offer: {tx.get('hash')}")
+        
+        meta = tx.get("meta") or tx.get("metaData", {})
+        affected_nodes = meta.get("AffectedNodes", [])
+        tx_json = tx.get("tx_json", {})
+        fee_xrp = get_transaction_fee(tx)
+        
+        # Find the offer that was filled
+        filled_offer = None
+        for node in affected_nodes:
+            if "DeletedNode" in node or "ModifiedNode" in node:
+                node_data = node.get("DeletedNode") or node.get("ModifiedNode", {})
+                if node_data.get("LedgerEntryType") == "Offer":
+                    final_fields = node_data.get("FinalFields", {})
+                    if final_fields.get("Account") in self.user_wallets.get(user_id, []):
+                        filled_offer = final_fields
+                        break
+        
+        if not filled_offer:
+            logger.warning(f"Could not find filled offer in transaction {tx.get('hash')}")
+            return
+            
+        # Create market trade record
+        market_trade = MarketTrade(
+            hash=tx.get("hash"),
+            ledger_index=tx.get("ledger_index"),
+            timestamp=ripple_time_to_datetime(tx_json.get("date", 0)),
+            taker_address=tx_json.get("Account"),  # The address that initiated the trade
+            maker_address=filled_offer.get("Account"),  # Our address
+            sold_amount=XRPLAmount.from_xrpl_amount(filled_offer.get("TakerGets")),  # What we sold
+            bought_amount=XRPLAmount.from_xrpl_amount(filled_offer.get("TakerPays")),  # What we bought
+            related_offer_sequence=filled_offer.get("Sequence"),
+            related_offer_hash=filled_offer.get("PreviousTxnID"),  # Hash of the offer creation
+            user_id=user_id,
+            fee_xrp=fee_xrp
+        )
+        
+        # Store market trade
+        self.db.store_market_trade(market_trade.model_dump())
+        
+        # Update the original offer's status
+        if filled_offer.get("PreviousTxnID"):
+            self.db.update_open_order(
+                filled_offer.get("PreviousTxnID"),
+                {
+                    "status": "filled",
+                    "last_checked_ledger": tx.get("ledger_index")
+                }
+            )
+            
+        # Get and update the original transaction status
+        if filled_offer.get("PreviousTxnID"):
+            original_tx = await self._get_transaction_status(filled_offer.get("PreviousTxnID"))
+            if original_tx:
+                self.db.update_transaction(original_tx)
+
+    async def _get_transaction_status(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the current status of a transaction.
+        
+        Args:
+            tx_hash: Transaction hash
+            
+        Returns:
+            Optional[Dict[str, Any]]: Updated transaction data or None if not found
+        """
+        try:
+            request = Tx(tx_hash)
+            response = await self.client.request(request)
+            
+            if not response.is_successful():
+                logger.error(f"Failed to get transaction status for {tx_hash}: {response.result}")
+                return None
+                
+            return response.result
+        except Exception as e:
+            logger.error(f"Error getting transaction status for {tx_hash}: {e}")
+            return None
 
     def _print_stats(self) -> None:
         """Print statistics."""
