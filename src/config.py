@@ -29,7 +29,7 @@ USER_CONFIG_REFRESH_INTERVAL = int(os.getenv("USER_CONFIG_REFRESH_INTERVAL", "60
 # Source tag to filter transactions
 SOURCE_TAG = int(os.getenv("SOURCE_TAG", "19089388"))
 
-FROM_LEDGER = int(os.getenv("FROM_LEDGER", "94000000"))
+FROM_LEDGER = int(os.getenv("FROM_LEDGER", "94700993"))
 
 # Default user configuration 
 # This is used to initialize the MongoDB users collection if it's empty
