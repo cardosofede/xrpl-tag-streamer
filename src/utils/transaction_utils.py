@@ -13,6 +13,7 @@ from xrpl.utils import (
 )
 
 from src.config import SOURCE_TAG
+from src.utils.transaction_processor import get_transaction_fee
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ def format_transaction_for_display(tx: Dict[str, Any]) -> Dict[str, Any]:
         "transaction_type": tx.get("TransactionType", ""),
         "account": tx.get("Account", ""),
         "destination": tx.get("Destination", ""),
-        "fee": int(tx.get("Fee", 0)) / 1_000_000,  # Convert to XRP
+        "fee": get_transaction_fee(tx),  # Convert to XRP
     }
     
     # Format amount
