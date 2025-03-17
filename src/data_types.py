@@ -62,6 +62,7 @@ class Trade(BaseModel):
     maker_address: str
     sold_amount: XRPLAmount
     bought_amount: XRPLAmount
+    related_offer_sequence: Optional[int] = None
 
 
 class Transaction(BaseModel):
@@ -74,6 +75,7 @@ class Transaction(BaseModel):
     timestamp: datetime
     raw_tx: Dict[str, Any]
     user_id: str
+    fee_xrp: float = 0.0  # Transaction fee in XRP
 
 
 class OpenOrder(BaseModel):
@@ -89,6 +91,7 @@ class OpenOrder(BaseModel):
     user_id: str
     transaction_type: TransactionType = TransactionType.OFFER_CREATE
     created_date: datetime
+    fee_xrp: float = 0.0  # Transaction fee in XRP
 
 
 class FilledOrder(BaseModel):
@@ -109,6 +112,7 @@ class FilledOrder(BaseModel):
     resolution_date: datetime
     cancel_tx_hash: Optional[str] = None
     trades: List[Trade] = Field(default_factory=list)
+    fee_xrp: float = 0.0  # Transaction fee in XRP
 
 
 class DepositWithdrawal(BaseModel):
@@ -121,10 +125,46 @@ class DepositWithdrawal(BaseModel):
     amount: XRPLAmount
     type: str  # "deposit" or "withdrawal"
     user_id: str
+    fee_xrp: Optional[float] = 0.0  # Transaction fee in XRP (relevant for withdrawals)
 
 
 class UserConfig(BaseModel):
     """User configuration model."""
     id: str
     wallets: List[str]
-    tags: List[int] = Field(default_factory=list) 
+    tags: List[int] = Field(default_factory=list)
+
+
+class MarketTrade(BaseModel):
+    """Represents a market trade that filled one of our orders."""
+    hash: str
+    ledger_index: int
+    timestamp: datetime
+    taker_address: str  # The address that initiated the trade
+    maker_address: str  # Our address (the one that had the offer)
+    sold_amount: XRPLAmount  # What was sold by the maker (us)
+    bought_amount: XRPLAmount  # What was bought by the maker (us)
+    related_offer_sequence: Optional[int] = None  # The sequence number of the offer that was filled
+    related_offer_hash: Optional[str] = None  # The hash of the offer that was filled
+    user_id: str  # The user ID that owns the maker address
+    fee_xrp: float = 0.0  # Transaction fee in XRP 
+
+
+class CanceledOrder(BaseModel):
+    """Represents an order that was canceled without being filled."""
+    hash: str  # Hash of the offer creation transaction
+    account: str
+    sequence: int
+    created_ledger_index: int
+    canceled_ledger_index: int  # When the order was canceled
+    taker_gets: XRPLAmount  # Original amount
+    taker_pays: XRPLAmount  # Original amount
+    status: OrderStatus = OrderStatus.CANCELED
+    user_id: str
+    transaction_type: TransactionType = TransactionType.OFFER_CREATE
+    created_date: datetime
+    canceled_date: datetime
+    cancel_tx_hash: str  # Hash of the cancel transaction
+    create_fee_xrp: float = 0.0  # Fee for creating the offer
+    cancel_fee_xrp: float = 0.0  # Fee for canceling the offer
+    total_fee_xrp: float = 0.0  # Total fees (create + cancel) 
