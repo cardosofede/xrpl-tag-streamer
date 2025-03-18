@@ -230,7 +230,7 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
         # Get balance changes for all affected accounts
         balance_changes = get_balance_changes(meta)
         
-        # Now look for matching changes in other accounts (the makers)
+        # Look for matching changes in other accounts (the makers)
         for balance_change in balance_changes:
             maker_address = balance_change["account"]
             # Skip the taker's own account
@@ -257,6 +257,8 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
                         issuer=change.get("issuer"),
                         value=str(abs(change_value))
                     )
+            
+            # Get related offer sequence if any
             related_offer_sequence = None
             for node_affected in meta.get("AffectedNodes", []):
                 key = next(iter(node_affected))
@@ -264,6 +266,7 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
                 if key in ["DeletedNode", "ModifiedNode"] and value["LedgerEntryType"] == "Offer":
                     related_offer_sequence = node_affected["FinalFields"]["Sequence"]
                     break
+            
             # If we have both what the maker sold and bought, create a trade
             if maker_sold and maker_bought:
                 trades.append(Trade(
@@ -276,12 +279,8 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
                     bought_amount=maker_bought,  # What the maker bought
                     related_offer_sequence=related_offer_sequence
                 ))
+                break  # Only create one trade per maker
         
-        # If no trades were found with the above method but we know a trade occurred,
-        # try to extract from affected nodes as a fallback
-        if not trades and (is_offer_filled(tx) or is_market_trade(tx)):
-            return _extract_trades_from_affected_nodes(tx)
-            
         return trades
     except Exception as e:
         # Fall back to the previous implementation
