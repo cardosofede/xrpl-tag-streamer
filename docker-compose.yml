@@ -16,6 +16,20 @@ services:
       - local
     restart: always
 
+  xrpl-tag-streamer:
+    image: xrpl-tag-streamer:latest
+    container_name: "xrpl-tag-streamer"
+    environment:
+      - MONGODB_URI=mongodb://xrpl:xrpl@mongo:27017/
+      - XRPL_RPC_URL=https://xrplcluster.com/
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mongo
+    networks:
+      - local
+    restart: always
+
 volumes:
   mongo-xrpl:
 
