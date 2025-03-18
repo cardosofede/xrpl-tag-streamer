@@ -916,7 +916,7 @@ class XRPLCollector:
         # Update the original offer's status
         if prev_tx_id:
             self.db.update_open_order(
-                filled_offer.get("PreviousTxnID"),
+                prev_tx_id,
                 {
                     "status": "filled",
                     "last_checked_ledger": tx.get("ledger_index")
