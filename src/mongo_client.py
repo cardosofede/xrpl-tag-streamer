@@ -136,6 +136,7 @@ class MongoDatabase:
         """
         # Add user_id to the transaction
         tx["user_id"] = user_id
+        tx["trades"] = [trade.model_dump() for trade in tx.get("trades", [])]
         
         # Insert or update the transaction
         self.transactions.update_one(
