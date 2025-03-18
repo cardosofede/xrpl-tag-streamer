@@ -29,7 +29,7 @@ from src.data_types import (
     DepositWithdrawal,
     TransactionType,
     OrderStatus,
-    UserConfig
+    UserConfig, CanceledOrder, MarketTrade
 )
 from src.utils.transaction_processor import (
     has_source_tag,
@@ -626,13 +626,13 @@ class XRPLCollector:
         logger.info(f"Processing filled offer transaction {tx.get('hash')}")
         
         # Extract trades from metadata, which now uses balance changes
-        trades = extract_trades_from_metadata(tx)
+        trades = tx.get("trades", [])
         
         # Get balance changes to determine what was bought and sold
         balance_changes = tx.get("balance_changes", [])
         tx_json = tx.get("tx_json", {})
         account = tx_json.get("Account")
-        fee_xrp = get_transaction_fee(tx)
+        fee_xrp = tx.get("fee_xrp", 0.0)
         
         # Initialize filled amounts
         filled_gets = None
@@ -702,7 +702,7 @@ class XRPLCollector:
         tx_json = tx.get("tx_json", {})
         account = tx_json.get("Account")
         offer_sequence = tx_json.get("OfferSequence")
-        cancel_fee_xrp = get_transaction_fee(tx)
+        cancel_fee_xrp = tx.get("fee_xrp")
         
         if not account or not offer_sequence:
             logger.warning(f"Cannot process OfferCancel without Account and OfferSequence: {tx.get('hash')}")
@@ -876,10 +876,11 @@ class XRPLCollector:
         meta = tx.get("meta") or tx.get("metaData", {})
         affected_nodes = meta.get("AffectedNodes", [])
         tx_json = tx.get("tx_json", {})
-        fee_xrp = get_transaction_fee(tx)
+        fee_xrp = tx.get("fee_xrp", 0.0)
         
         # Find the offer that was filled
         filled_offer = None
+        prev_tx_id = None
         for node in affected_nodes:
             if "DeletedNode" in node or "ModifiedNode" in node:
                 node_data = node.get("DeletedNode") or node.get("ModifiedNode", {})
@@ -887,6 +888,7 @@ class XRPLCollector:
                     final_fields = node_data.get("FinalFields", {})
                     if final_fields.get("Account") in self.user_wallets.get(user_id, []):
                         filled_offer = final_fields
+                        prev_tx_id = node_data.get("PreviousTxnID")
                         break
         
         if not filled_offer:
@@ -903,7 +905,7 @@ class XRPLCollector:
             sold_amount=XRPLAmount.from_xrpl_amount(filled_offer.get("TakerGets")),  # What we sold
             bought_amount=XRPLAmount.from_xrpl_amount(filled_offer.get("TakerPays")),  # What we bought
             related_offer_sequence=filled_offer.get("Sequence"),
-            related_offer_hash=filled_offer.get("PreviousTxnID"),  # Hash of the offer creation
+            related_offer_hash=prev_tx_id,  # Hash of the offer creation
             user_id=user_id,
             fee_xrp=fee_xrp
         )
@@ -912,7 +914,7 @@ class XRPLCollector:
         self.db.store_market_trade(market_trade.model_dump())
         
         # Update the original offer's status
-        if filled_offer.get("PreviousTxnID"):
+        if prev_tx_id:
             self.db.update_open_order(
                 filled_offer.get("PreviousTxnID"),
                 {
@@ -922,8 +924,8 @@ class XRPLCollector:
             )
             
         # Get and update the original transaction status
-        if filled_offer.get("PreviousTxnID"):
-            original_tx = await self._get_transaction_status(filled_offer.get("PreviousTxnID"))
+        if prev_tx_id:
+            original_tx = await self._get_transaction_status(prev_tx_id)
             if original_tx:
                 self.db.update_transaction(original_tx)
 
