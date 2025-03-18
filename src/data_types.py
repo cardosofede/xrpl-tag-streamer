@@ -64,7 +64,7 @@ class Trade(BaseModel):
     bought_amount: XRPLAmount  # What was bought by the maker (us)
     related_offer_sequence: Optional[int] = None  # The sequence number of the offer that was filled
     related_offer_hash: Optional[str] = None  # The hash of the offer that was filled
-    user_id: str  # The user ID that owns the maker address
+    user_id: Optional[str] = None # The user ID that owns the maker address
     fee_xrp: float = 0.0  # Transaction fee in XRP
 
 
