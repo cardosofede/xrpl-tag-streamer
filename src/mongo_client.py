@@ -35,7 +35,7 @@ class MongoDatabase:
         self.open_orders: Collection = self.db["open_orders"]
         self.filled_orders: Collection = self.db["filled_orders"]
         self.deposits_withdrawals: Collection = self.db["deposits_withdrawals"]
-        self.market_trades: Collection = self.db["market_trades"]
+        self.trades: Collection = self.db["trades"]
         self.canceled_orders: Collection = self.db["canceled_orders"]  # New collection for canceled orders
         
         # Create indexes
@@ -79,14 +79,14 @@ class MongoDatabase:
         self.deposits_withdrawals.create_index("user_id")
         self.deposits_withdrawals.create_index("type")
 
-        # Market trades collection indexes
-        self.market_trades.create_index("hash", unique=True)
-        self.market_trades.create_index("ledger_index")
-        self.market_trades.create_index("taker_address")
-        self.market_trades.create_index("maker_address")
-        self.market_trades.create_index("user_id")
-        self.market_trades.create_index("related_offer_sequence")
-        self.market_trades.create_index("related_offer_hash")
+        # Trades collection indexes
+        self.trades.create_index("hash", unique=True)
+        self.trades.create_index("ledger_index")
+        self.trades.create_index("taker_address")
+        self.trades.create_index("maker_address")
+        self.trades.create_index("user_id")
+        self.trades.create_index("related_offer_sequence")
+        self.trades.create_index("related_offer_hash")
 
         # Canceled orders collection indexes
         self.canceled_orders.create_index("hash", unique=True)
@@ -390,30 +390,30 @@ class MongoDatabase:
         
         return result.modified_count > 0
 
-    def store_market_trade(self, trade: Dict[str, Any]) -> str:
+    def store_trade(self, trade: Dict[str, Any]) -> str:
         """
-        Store a market trade that filled one of our orders.
+        Store a trade that filled one of our orders.
         
         Args:
-            trade: Market trade data
+            trade: Trade data
             
         Returns:
             str: Trade hash
         """
         # Insert or update the trade
-        self.market_trades.update_one(
+        self.trades.update_one(
             {"hash": trade["hash"]},
             {"$set": trade},
             upsert=True
         )
         
-        logger.info(f"Stored market trade {trade['hash']} for user {trade['user_id']}")
+        logger.info(f"Stored trade {trade['hash']} for user {trade['user_id']}")
         
         return trade["hash"]
 
-    def get_market_trades(self, user_id: Optional[str] = None, related_offer_hash: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_trades(self, user_id: Optional[str] = None, related_offer_hash: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """
-        Get market trades from the database.
+        Get trades from the database.
         
         Args:
             user_id: Filter by user ID
@@ -421,7 +421,7 @@ class MongoDatabase:
             limit: Maximum number of trades to return
             
         Returns:
-            List of market trade documents
+            List of trade documents
         """
         query = {}
         if user_id:
@@ -429,11 +429,11 @@ class MongoDatabase:
         if related_offer_hash:
             query["related_offer_hash"] = related_offer_hash
             
-        return list(self.market_trades.find(query).sort("ledger_index", -1).limit(limit))
+        return list(self.trades.find(query).sort("ledger_index", -1).limit(limit))
 
-    def update_market_trade(self, trade_hash: str, update_data: Dict[str, Any]) -> bool:
+    def update_trade(self, trade_hash: str, update_data: Dict[str, Any]) -> bool:
         """
-        Update a market trade in the database.
+        Update a trade in the database.
         
         Args:
             trade_hash: Trade hash
@@ -442,7 +442,7 @@ class MongoDatabase:
         Returns:
             bool: True if updated, False if not found
         """
-        result = self.market_trades.update_one(
+        result = self.trades.update_one(
             {"hash": trade_hash},
             {"$set": update_data}
         )
