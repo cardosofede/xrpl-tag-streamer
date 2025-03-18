@@ -34,13 +34,8 @@ from src.data_types import (
 from src.utils.transaction_processor import (
     has_source_tag,
     analyze_transaction,
-    is_deposit_or_withdrawal,
-    is_offer_filled,
     is_market_trade,
-    extract_trades_from_metadata,
     extract_amount,
-    extract_transaction_balance_changes,
-    get_transaction_fee
 )
 
 logger = logging.getLogger(__name__)
@@ -416,6 +411,7 @@ class XRPLCollector:
             logger.info(f"Stored transaction {tx.get('hash')} for user {user_id}")
 
         if tx_type == "Payment":
+            logger.info("Processing Payment transaction")
             # Check if this is a deposit/withdrawal or market trade
             if enriched_tx["transaction_nature"] in ["deposit", "withdrawal", "internal_transfer"]:
                 # Process as deposit or withdrawal
@@ -430,6 +426,7 @@ class XRPLCollector:
                     self._process_market_trade(enriched_tx, user_id)
 
         elif tx_type == "OfferCreate":
+            logger.info("Processing OfferCreate transaction")
             # Check if the offer was filled immediately or not
             if enriched_tx["offer_filled"]:
                 # Process as filled offer
@@ -439,6 +436,7 @@ class XRPLCollector:
                 self._process_open_offer(enriched_tx, user_id)
 
         elif tx_type == "OfferCancel":
+            logger.info("Processing OfferCancel transaction")
             # Process offer cancellation
             self._process_offer_cancel(enriched_tx, user_id)
     
@@ -730,31 +728,12 @@ class XRPLCollector:
         if not open_order:
             logger.warning(f"Open order not found for account {account}, sequence {offer_sequence}")
             return
-        
-        # Check if the order was partially filled
-        meta = tx.get("meta") or tx.get("metaData", {})
-        affected_nodes = meta.get("AffectedNodes", [])
-        is_partially_filled = False
-        
-        for node in affected_nodes:
-            if "ModifiedNode" in node:
-                node_data = node.get("ModifiedNode", {})
-                if node_data.get("LedgerEntryType") == "Offer":
-                    # If there are changes to TakerGets or TakerPays, the order was partially filled
-                    if "PreviousFields" in node_data and "FinalFields" in node_data:
-                        prev_fields = node_data["PreviousFields"]
-                        final_fields = node_data["FinalFields"]
-                        if ("TakerGets" in prev_fields and "TakerGets" in final_fields) or \
-                           ("TakerPays" in prev_fields and "TakerPays" in final_fields):
-                            is_partially_filled = True
-                            break
-        
-        if is_partially_filled:
-            # Process as filled order with partial fill
-            self._process_partially_filled_order(open_order, tx, user_id, cancel_fee_xrp)
-        else:
+        if OrderStatus.OPEN == open_order["status"]:
             # Process as canceled order
             self._process_canceled_order(open_order, tx, user_id, cancel_fee_xrp)
+        else:
+            # Process as filled order with partial fill
+            self._process_partially_filled_order(open_order, tx, user_id, cancel_fee_xrp)
 
     def _process_partially_filled_order(self, open_order: Dict[str, Any], cancel_tx: Dict[str, Any], user_id: str, cancel_fee_xrp: float) -> None:
         """
@@ -766,33 +745,6 @@ class XRPLCollector:
             user_id: The user ID
             cancel_fee_xrp: Fee for the cancel transaction
         """
-        # Calculate filled amounts from the modified node
-        meta = cancel_tx.get("meta") or cancel_tx.get("metaData", {})
-        affected_nodes = meta.get("AffectedNodes", [])
-        
-        filled_gets = None
-        filled_pays = None
-        
-        for node in affected_nodes:
-            if "ModifiedNode" in node:
-                node_data = node.get("ModifiedNode", {})
-                if node_data.get("LedgerEntryType") == "Offer":
-                    prev_fields = node_data.get("PreviousFields", {})
-                    final_fields = node_data.get("FinalFields", {})
-                    
-                    # Calculate filled amounts as the difference
-                    if "TakerGets" in prev_fields and "TakerGets" in final_fields:
-                        filled_gets = calculate_amount_difference(
-                            prev_fields["TakerGets"],
-                            final_fields["TakerGets"]
-                        )
-                    
-                    if "TakerPays" in prev_fields and "TakerPays" in final_fields:
-                        filled_pays = calculate_amount_difference(
-                            prev_fields["TakerPays"],
-                            final_fields["TakerPays"]
-                        )
-        
         # Create filled order record
         filled_order = FilledOrder(
             hash=open_order.get("hash"),
@@ -802,8 +754,8 @@ class XRPLCollector:
             resolved_ledger_index=cancel_tx.get("ledger_index"),
             taker_gets=XRPLAmount.from_xrpl_amount(open_order.get("taker_gets")),
             taker_pays=XRPLAmount.from_xrpl_amount(open_order.get("taker_pays")),
-            filled_gets=filled_gets,
-            filled_pays=filled_pays,
+            filled_gets=XRPLAmount.from_xrpl_amount(open_order.get("filled_gets")),
+            filled_pays=XRPLAmount.from_xrpl_amount(open_order.get("filled_pays")),
             status=OrderStatus.PARTIALLY_FILLED,
             user_id=user_id,
             transaction_type=TransactionType.OFFER_CREATE,
@@ -992,8 +944,8 @@ class XRPLCollector:
                     {
                         "status": OrderStatus.PARTIALLY_FILLED,
                         "last_checked_ledger": tx.get("ledger_index"),
-                        "filled_gets": total_filled_gets.to_dict(),
-                        "filled_pays": total_filled_pays.to_dict(),
+                        "filled_gets": total_filled_gets.model_dump(),
+                        "filled_pays": total_filled_pays.model_dump(),
                         "trades": existing_trades
                     }
                 )
