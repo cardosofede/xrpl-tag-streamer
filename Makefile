@@ -1,4 +1,4 @@
-.PHONY: setup install stream history query stats clean
+.PHONY: setup install stream history query stats clean docker-build docker-up docker-down
 
 # Setup environment
 setup:
@@ -43,3 +43,13 @@ format:
 # Run tests
 test:
 	pytest 
+
+# Docker commands
+docker-build:
+	docker build -t xrpl-tag-streamer:latest .
+
+docker-up:
+	docker-compose up -d
+
+docker-down:
+	docker-compose down 

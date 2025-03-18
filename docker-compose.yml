@@ -1,0 +1,38 @@
+services:
+  mongo:
+    image: mongo:latest
+    container_name: "xrpl-mongo"
+    logging:
+      options:
+        max-size: 1g
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "xrpl"
+      MONGO_INITDB_ROOT_PASSWORD: "xrpl"
+    ports:
+      - 27017:27017
+    volumes:
+      - mongo-xrpl:/data/db
+    networks:
+      - local
+    restart: always
+
+  xrpl-tag-streamer:
+    image: xrpl-tag-streamer:latest
+    container_name: "xrpl-tag-streamer"
+    environment:
+      - MONGO_URI=mongodb://xrpl:xrpl@xrpl-mongo:27017/
+      - XRPL_RPC_URL=https://xrplcluster.com/
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mongo
+    networks:
+      - local
+    restart: always
+
+volumes:
+  mongo-xrpl:
+
+networks:
+  local:
+    driver: bridge
