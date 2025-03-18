@@ -270,7 +270,7 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
             # If we have both what the maker sold and bought, create a trade
             if maker_sold and maker_bought:
                 trades.append(Trade(
-                    tx_hash=tx_hash,
+                    hash=tx_hash,
                     ledger_index=ledger_index,
                     timestamp=timestamp,
                     taker_address=taker_address,
@@ -352,7 +352,7 @@ def _extract_trades_from_affected_nodes(tx: Dict[str, Any]) -> List[Trade]:
                 # Create trade record if we have all needed data
                 if maker_address and sold_amount and bought_amount:
                     trades.append(Trade(
-                        tx_hash=tx_hash,
+                        hash=tx_hash,
                         ledger_index=ledger_index,
                         timestamp=timestamp,
                         taker_address=taker_address,
