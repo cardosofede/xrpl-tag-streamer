@@ -360,11 +360,6 @@ class XRPLCollector:
                 # Extract transactions
                 transactions = response.result.get("transactions", [])
 
-                if len(transactions) == 0:
-                    logger.debug(f"No transactions found for wallet {address}")
-                    all_transactions_queried = True
-                    continue
-
                 logger.info(f"Processing {len(transactions)} transactions for wallet {address}")
 
                 # Process each transaction following the pipeline approach
@@ -383,6 +378,10 @@ class XRPLCollector:
                     self.stats["total_transactions"] += 1
                     if has_source_tag(tx, str(self.source_tag)):
                         self.stats["matching_transactions"] += 1
+
+                if len(transactions) <= 1:
+                    logger.debug(f"No transactions found for wallet {address}")
+                    all_transactions_queried = True
 
             except Exception as e:
                 logger.error(f"Error processing wallet {address}: {e}")
