@@ -29,7 +29,7 @@ from src.data_types import (
     DepositWithdrawal,
     TransactionType,
     OrderStatus,
-    UserConfig, CanceledOrder, MarketTrade
+    UserConfig, CanceledOrder, Trade
 )
 from src.utils.transaction_processor import (
     has_source_tag,
@@ -519,7 +519,7 @@ class XRPLCollector:
         balance_changes = tx.get("balance_changes", [])
         tx_json = tx.get("tx_json", {})
         account = tx_json.get("Account")
-        fee_xrp = tx_json.get("fee_xrp", 0.0)
+        fee_xrp = tx.get("fee_xrp", 0.0)
         tx_type = tx_json.get("TransactionType")
         
         # Initialize sold and bought amounts (for filled amounts)
@@ -559,6 +559,22 @@ class XRPLCollector:
         # For Payment transactions, the original amount is in the tx_json
         original_amount = extract_amount(tx)
         
+        # Create trade record
+        trade = Trade(
+            hash=tx.get("hash"),
+            ledger_index=tx.get("ledger_index"),
+            timestamp=ripple_time_to_datetime(tx_json.get("date", 0)),
+            taker_address=tx_json.get("Account"),
+            maker_address=tx_json.get("Destination"),
+            sold_amount=sold_amount,
+            bought_amount=bought_amount,
+            user_id=user_id,
+            fee_xrp=fee_xrp
+        )
+        
+        # Store trade
+        self.db.store_trade(trade.model_dump())
+        
         # Create filled order record for the market trade
         filled_order = FilledOrder(
             hash=tx.get("hash"),
@@ -577,7 +593,7 @@ class XRPLCollector:
             transaction_type=TransactionType.PAYMENT,
             created_date=ripple_time_to_datetime(tx_json.get("date", 0)),
             resolution_date=ripple_time_to_datetime(tx_json.get("date", 0)),
-            trades=trades,
+            trades=[trade],
             fee_xrp=fee_xrp  # Include fee information
         )
         
@@ -881,22 +897,25 @@ class XRPLCollector:
         # Find the offer that was filled
         filled_offer = None
         prev_tx_id = None
+        prev_tx_status = None
         for node in affected_nodes:
-            if "DeletedNode" in node or "ModifiedNode" in node:
-                node_data = node.get("DeletedNode") or node.get("ModifiedNode", {})
+            key = next(iter(node))
+            if key in ["DeletedNode", "ModifiedNode"]:
+                node_data = node.get(key)
                 if node_data.get("LedgerEntryType") == "Offer":
                     final_fields = node_data.get("FinalFields", {})
                     if final_fields.get("Account") in self.user_wallets.get(user_id, []):
                         filled_offer = final_fields
                         prev_tx_id = node_data.get("PreviousTxnID")
+                        prev_tx_status = "partially_filled" if key == "ModifiedNode" else "filled"
                         break
         
         if not filled_offer:
             logger.warning(f"Could not find filled offer in transaction {tx.get('hash')}")
             return
             
-        # Create market trade record
-        market_trade = MarketTrade(
+        # Create trade record
+        trade = Trade(
             hash=tx.get("hash"),
             ledger_index=tx.get("ledger_index"),
             timestamp=ripple_time_to_datetime(tx_json.get("date", 0)),
@@ -910,24 +929,74 @@ class XRPLCollector:
             fee_xrp=fee_xrp
         )
         
-        # Store market trade
-        self.db.store_market_trade(market_trade.model_dump())
+        # Store trade
+        self.db.store_trade(trade.model_dump())
         
-        # Update the original offer's status
         if prev_tx_id:
-            self.db.update_open_order(
-                prev_tx_id,
-                {
-                    "status": "filled",
-                    "last_checked_ledger": tx.get("ledger_index")
-                }
-            )
-            
-        # Get and update the original transaction status
-        if prev_tx_id:
-            original_tx = await self._get_transaction_status(prev_tx_id)
-            if original_tx:
-                self.db.update_transaction(original_tx)
+            # Get the original open order
+            open_order = self.db.get_open_order_by_sequence(filled_offer.get("Account"), filled_offer.get("Sequence"))
+            # Get existing trades for this order
+            existing_trades = self.db.get_trades(related_offer_hash=prev_tx_id)
+
+            if not open_order:
+                logger.warning(f"Could not find original open order for sequence {filled_offer.get('Sequence')}")
+                return
+                
+            if prev_tx_status == "filled":
+                # Create filled order record
+                filled_order = FilledOrder(
+                    hash=open_order.get("hash"),
+                    account=open_order.get("account"),
+                    sequence=open_order.get("sequence"),
+                    created_ledger_index=open_order.get("created_ledger_index"),
+                    resolved_ledger_index=tx.get("ledger_index"),
+                    taker_gets=XRPLAmount.from_xrpl_amount(open_order.get("taker_gets")),
+                    taker_pays=XRPLAmount.from_xrpl_amount(open_order.get("taker_pays")),
+                    filled_gets=XRPLAmount.from_xrpl_amount(open_order.get("taker_gets")),  # Fully filled
+                    filled_pays=XRPLAmount.from_xrpl_amount(open_order.get("taker_pays")),  # Fully filled
+                    status=OrderStatus.FILLED,
+                    user_id=user_id,
+                    transaction_type=TransactionType.OFFER_CREATE,
+                    created_date=open_order.get("created_date"),
+                    resolution_date=ripple_time_to_datetime(tx_json.get("date", 0)),
+                    trades=existing_trades,
+                    fee_xrp=open_order.get("fee_xrp", 0.0)
+                )
+                
+                # Store filled order and delete open order
+                self.db.store_filled_order(filled_order.model_dump())
+                self.db.delete_open_order(open_order.get("hash"))
+                
+            else:  # partially_filled
+                # Calculate cumulative filled amounts from all trades
+                original_gets = XRPLAmount.from_xrpl_amount(open_order.get("taker_gets"))
+                remaining_gets = XRPLAmount.from_xrpl_amount(filled_offer.get("TakerGets"))
+                original_pays = XRPLAmount.from_xrpl_amount(open_order.get("taker_pays"))
+                remaining_pays = XRPLAmount.from_xrpl_amount(filled_offer.get("TakerPays"))
+                
+                # Calculate filled amounts as the difference between original and remaining
+                total_filled_gets = XRPLAmount(
+                    currency=original_gets.currency,
+                    issuer=original_gets.issuer,
+                    value=str(float(original_gets.value) - float(remaining_gets.value))
+                )
+                total_filled_pays = XRPLAmount(
+                    currency=original_pays.currency,
+                    issuer=original_pays.issuer,
+                    value=str(float(original_pays.value) - float(remaining_pays.value))
+                )
+                
+                # Update open order with new amounts and add trade
+                self.db.update_open_order(
+                    prev_tx_id,
+                    {
+                        "status": OrderStatus.PARTIALLY_FILLED,
+                        "last_checked_ledger": tx.get("ledger_index"),
+                        "filled_gets": total_filled_gets.to_dict(),
+                        "filled_pays": total_filled_pays.to_dict(),
+                        "trades": existing_trades
+                    }
+                )
 
     async def _get_transaction_status(self, tx_hash: str) -> Optional[Dict[str, Any]]:
         """
@@ -940,7 +1009,7 @@ class XRPLCollector:
             Optional[Dict[str, Any]]: Updated transaction data or None if not found
         """
         try:
-            request = Tx(tx_hash)
+            request = Tx(transaction=tx_hash)
             response = await self.client.request(request)
             
             if not response.is_successful():
