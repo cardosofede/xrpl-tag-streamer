@@ -264,7 +264,7 @@ def extract_trades_from_metadata(tx: Dict[str, Any]) -> List[Trade]:
                 key = next(iter(node_affected))
                 value = node_affected.get(key)
                 if key in ["DeletedNode", "ModifiedNode"] and value["LedgerEntryType"] == "Offer":
-                    related_offer_sequence = node_affected["FinalFields"]["Sequence"]
+                    related_offer_sequence = value["FinalFields"]["Sequence"]
                     break
             
             # If we have both what the maker sold and bought, create a trade
