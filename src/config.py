@@ -16,7 +16,7 @@ XRPL_WS_URL = os.getenv("XRPL_WS_URL", "https://xrplcluster.com/")
 XRPL_RPC_URL = os.getenv("XRPL_RPC_URL", "https://xrplcluster.com/")
 
 # MongoDB Configuration
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://wiz-ai:wiz-ai@localhost:27017/")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://xrpl:xrpl@localhost:27017/")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "xrpl_transactions")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "transactions")
 
