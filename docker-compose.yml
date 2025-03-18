@@ -1,0 +1,24 @@
+services:
+  mongo:
+    image: mongo:latest
+    container_name: "xrpl-mongo"
+    logging:
+      options:
+        max-size: 1g
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "xrpl"
+      MONGO_INITDB_ROOT_PASSWORD: "xrpl"
+    ports:
+      - 27017:27017
+    volumes:
+      - mongo-xrpl:/data/db
+    networks:
+      - local
+    restart: always
+
+volumes:
+  mongo-xrpl:
+
+networks:
+  local:
+    driver: bridge
