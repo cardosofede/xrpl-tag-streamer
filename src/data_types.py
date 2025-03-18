@@ -54,15 +54,18 @@ class XRPLAmount(BaseModel):
 
 
 class Trade(BaseModel):
-    """Represents a trade that contributed to filling an order."""
-    tx_hash: str
+    """Represents a trade that filled an order."""
+    hash: str
     ledger_index: int
     timestamp: datetime
-    taker_address: str
-    maker_address: str
-    sold_amount: XRPLAmount
-    bought_amount: XRPLAmount
-    related_offer_sequence: Optional[int] = None
+    taker_address: str  # The address that initiated the trade
+    maker_address: str  # Our address (the one that had the offer)
+    sold_amount: XRPLAmount  # What was sold by the maker (us)
+    bought_amount: XRPLAmount  # What was bought by the maker (us)
+    related_offer_sequence: Optional[int] = None  # The sequence number of the offer that was filled
+    related_offer_hash: Optional[str] = None  # The hash of the offer that was filled
+    user_id: str  # The user ID that owns the maker address
+    fee_xrp: float = 0.0  # Transaction fee in XRP
 
 
 class Transaction(BaseModel):
