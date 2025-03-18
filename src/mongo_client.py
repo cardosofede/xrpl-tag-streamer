@@ -163,7 +163,10 @@ class MongoDatabase:
         if user_id:
             query["user_id"] = user_id
         if wallet:
-            query["$or"] = [{"Account": wallet}, {"Destination": wallet}]
+            query["$or"] = [
+                {"tx_json.Account": wallet},
+                {"tx_json.Destination": wallet}
+            ]
             
         return list(self.transactions.find(query).sort("ledger_index", -1).limit(limit))
 

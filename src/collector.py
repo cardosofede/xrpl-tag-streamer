@@ -165,29 +165,23 @@ class XRPLCollector:
     async def _get_min_ledger_index(self, user_id: str, wallet: str) -> int:
         """
         Get the minimum ledger index to start searching from for a wallet.
-        This is either the last seen ledger or the minimum from config.
+        This is the maximum ledger index seen in transactions for this wallet.
         
         Args:
             user_id: The user ID that owns this wallet
             wallet: The wallet address
             
         Returns:
-            int: The minimum ledger index
+            int: The minimum ledger index to start searching from
         """
         # Get the last processed transaction for this wallet
         last_tx = self.db.get_transactions(user_id=user_id, wallet=wallet, limit=1)
         
-        # Get the minimum ledger from the open orders for this wallet
-        min_order_ledger = self.db.get_min_open_order_ledger(wallet)
+        # Get the maximum ledger index from transactions
+        max_ledger = last_tx[0].get("ledger_index") if len(last_tx) > 0 else FROM_LEDGER
         
-        # Get the last processed ledger
-        last_ledger = last_tx[0].get("ledger_index") if len(last_tx) > 0 else FROM_LEDGER
-        
-        # Return the minimum ledger index (the lowest of the two)
-        if min_order_ledger and min_order_ledger < last_ledger:
-            return min_order_ledger
-        
-        return last_ledger
+        # Return the maximum ledger index as our starting point
+        return max_ledger
 
     async def stop(self) -> None:
         """Stop the collector."""
@@ -347,7 +341,8 @@ class XRPLCollector:
                 request = AccountTx(
                     account=address,
                     ledger_index_min=ledger_index_min,
-                    forward=True
+                    forward=True,
+                    limit=400,
                 )
                 response = await self.client.request(request)
 
@@ -359,6 +354,10 @@ class XRPLCollector:
 
                 # Extract transactions
                 transactions = response.result.get("transactions", [])
+
+                if len(transactions) <= 1:
+                    logger.debug(f"No transactions found for wallet {address}")
+                    all_transactions_queried = True
 
                 logger.info(f"Processing {len(transactions)} transactions for wallet {address}")
 
@@ -378,10 +377,6 @@ class XRPLCollector:
                     self.stats["total_transactions"] += 1
                     if has_source_tag(tx, str(self.source_tag)):
                         self.stats["matching_transactions"] += 1
-
-                if len(transactions) <= 1:
-                    logger.debug(f"No transactions found for wallet {address}")
-                    all_transactions_queried = True
 
             except Exception as e:
                 logger.error(f"Error processing wallet {address}: {e}")

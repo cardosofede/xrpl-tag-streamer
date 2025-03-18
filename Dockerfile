@@ -7,7 +7,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -LsSf https://astral.sh/uv/install.sh | sh
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && ln -s /root/.cargo/bin/uv /usr/local/bin/uv
 
 # Copy project files
 COPY pyproject.toml .
