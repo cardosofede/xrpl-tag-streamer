@@ -312,7 +312,8 @@ class XRPLCollector:
             "transaction_type": order.get("transaction_type") or "OfferCreate",
             "created_date": order.get("created_date"),
             "resolution_date": datetime.now(),
-            "resolution_method": "inferred"  # We're inferring this was filled
+            "resolution_method": "inferred",  # We're inferring this was filled
+            "fee_xrp": order.get("fee_xrp", 0.0)
         }
         
         # Store filled order and remove from open orders
