@@ -789,7 +789,7 @@ class XRPLCollector:
             cancel_tx_hash=cancel_tx.get("hash"),
             create_fee_xrp=open_order.get("fee_xrp", 0.0),
             cancel_fee_xrp=cancel_fee_xrp,
-            total_fee_xrp=open_order.get("fee_xrp", 0.0) + cancel_fee_xrp
+            fee_xrp=open_order.get("fee_xrp", 0.0) + cancel_fee_xrp
         )
         
         # Store in database and remove from open orders

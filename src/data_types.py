@@ -170,4 +170,4 @@ class CanceledOrder(BaseModel):
     cancel_tx_hash: str  # Hash of the cancel transaction
     create_fee_xrp: float = 0.0  # Fee for creating the offer
     cancel_fee_xrp: float = 0.0  # Fee for canceling the offer
-    total_fee_xrp: float = 0.0  # Total fees (create + cancel) 
+    fee_xrp: float = 0.0  # Total fees (create + cancel)
