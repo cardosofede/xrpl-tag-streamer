@@ -356,7 +356,7 @@ class XRPLCollector:
                 # Extract transactions
                 transactions = response.result.get("transactions", [])
 
-                if len(transactions) <= 1:
+                if len(transactions) <= 3:
                     logger.debug(f"No transactions found for wallet {address}")
                     all_transactions_queried = True
 
