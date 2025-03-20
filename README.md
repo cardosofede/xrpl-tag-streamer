@@ -16,7 +16,11 @@ This application periodically fetches transactions for a list of wallets from th
 - Periodic refresh of user configurations
 - Automatic collection creation and initialization
 
-## Installation
+## Installation and Setup
+
+### Option 1: Using the Makefile (Recommended)
+
+The project includes a Makefile to simplify common operations:
 
 1. Clone this repository:
 ```bash
@@ -24,32 +28,65 @@ git clone https://github.com/yourusername/xrpl-tag-collector.git
 cd xrpl-tag-collector
 ```
 
-2. Install dependencies:
+2. Run the setup script to create a virtual environment and install dependencies:
 ```bash
-pip install -r requirements.txt
+make setup
 ```
 
-3. Set up MongoDB:
-   - Install MongoDB locally, use a cloud service like MongoDB Atlas, or run with Docker
+3. Activate the virtual environment (the setup script will show you the command for your shell)
 
-### Running MongoDB with Docker
-
-If you don't have MongoDB installed locally, you can easily run it using Docker:
-
+4. Install the package in development mode:
 ```bash
-docker run --name mongo -d -p 27017:27017 mongo:latest
+make install        # Basic installation
+# OR
+make dev-install    # Installation with development dependencies
 ```
 
-This command will:
-- Start a MongoDB container named "mongo"
-- Run it in the background (-d)
-- Map port 27017 on your local machine to port 27017 in the container
+### Option 2: Manual Installation
 
-You can then connect to this MongoDB instance at `mongodb://localhost:27017/`.
+1. Clone this repository:
+```bash
+git clone https://github.com/yourusername/xrpl-tag-collector.git
+cd xrpl-tag-collector
+```
+
+2. Create and activate a virtual environment:
+```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+```
+
+3. Install dependencies:
+```bash
+pip install -e .        # Basic installation
+# OR
+pip install -e ".[dev]" # Installation with development dependencies
+```
+
+### Setting up MongoDB
+
+Set up MongoDB using one of these methods:
+- Install MongoDB locally
+- Use a cloud service like MongoDB Atlas
+- Run with Docker (recommended for development)
+
+#### Running MongoDB with Docker
+
+If you're using Docker, you can run both MongoDB and the application with:
+
+```bash
+make docker-build   # Build the Docker image
+make docker-up      # Start the application and MongoDB containers
+```
+
+To stop the containers:
+```bash
+make docker-down
+```
 
 ## Configuration
 
-Create a `.env` file in the root directory with the following variables (or set environment variables):
+Create a `.env` file in the root directory (you can copy from `.env.example`):
 
 ```
 # XRPL Node Configuration
@@ -72,47 +109,35 @@ SOURCE_TAG=12345
 
 ## Usage
 
-### Running the Collector
+### Running the Application
+
+The Makefile provides convenient commands for running different modes:
 
 ```bash
-python -m src.main
+make stream    # Run the transaction streamer to collect real-time transactions
+make history   # Process historical transactions
+make query     # Query stored transactions
+make stats     # Show statistics about collected data
 ```
 
-When the collector starts, it:
-1. Verifies the MongoDB connection
-2. Creates the necessary collections if they don't exist
-3. Sets up the required indexes
-4. Initializes the users collection with default users if it's empty
+These commands are equivalent to:
 
-### Managing Users
-
-User configuration is stored in the MongoDB database in a collection called `users`. You can use the MongoDB shell, a GUI tool like MongoDB Compass, or programmatically add/edit users.
-
-The user document structure is:
-
-```json
-{
-  "id": "user1",
-  "wallets": ["rPEPPER7kfTD9w2To4CQk6UCfuHM9c6GDY", "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"]
-}
+```bash
+python -m src.main stream
+python -m src.main history
+python -m src.main query
+python -m src.main stats
 ```
 
-Default users from `config.py` are used to initialize the database if it's empty:
+### Development Tools
 
-```python
-DEFAULT_USERS = [
-    {
-        "id": "user1",
-        "wallets": ["rPEPPER7kfTD9w2To4CQk6UCfuHM9c6GDY", "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"]
-    },
-    {
-        "id": "user2",
-        "wallets": ["rBepJuTLFJt3WmtLXYAxSjtBWAeQxVbncv"]
-    }
-]
+The Makefile also provides commands for development:
+
+```bash
+make format    # Format code with black and isort
+make test      # Run tests
+make clean     # Clean build artifacts and cache files
 ```
-
-The application will automatically refresh the user configuration every `USER_CONFIG_REFRESH_INTERVAL` seconds.
 
 ## How It Works
 
