@@ -17,7 +17,7 @@ services:
     restart: always
 
   xrpl-tag-streamer:
-    image: xrpl-tag-streamer:latest
+    image: ${DOCKERHUB_USERNAME}/xrpl-tag-streamer:latest
     container_name: "xrpl-tag-streamer"
     environment:
       - MONGO_URI=mongodb://xrpl:xrpl@xrpl-mongo:27017/
@@ -26,6 +26,21 @@ services:
       - ./data:/app/data
     depends_on:
       - mongo
+    networks:
+      - local
+    restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: "xrpl-watchtower"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKER_USERNAME=${DOCKERHUB_USERNAME}
+      - DOCKER_PASSWORD=${DOCKERHUB_TOKEN}
+    command: --interval 30 --cleanup --label-enable
     networks:
       - local
     restart: always
