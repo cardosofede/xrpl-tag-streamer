@@ -312,7 +312,8 @@ class XRPLCollector:
             "transaction_type": order.get("transaction_type") or "OfferCreate",
             "created_date": order.get("created_date"),
             "resolution_date": datetime.now(),
-            "resolution_method": "inferred"  # We're inferring this was filled
+            "resolution_method": "inferred",  # We're inferring this was filled
+            "fee_xrp": order.get("fee_xrp", 0.0)
         }
         
         # Store filled order and remove from open orders
@@ -355,7 +356,7 @@ class XRPLCollector:
                 # Extract transactions
                 transactions = response.result.get("transactions", [])
 
-                if len(transactions) <= 1:
+                if len(transactions) <= 3:
                     logger.debug(f"No transactions found for wallet {address}")
                     all_transactions_queried = True
 
@@ -789,7 +790,7 @@ class XRPLCollector:
             cancel_tx_hash=cancel_tx.get("hash"),
             create_fee_xrp=open_order.get("fee_xrp", 0.0),
             cancel_fee_xrp=cancel_fee_xrp,
-            total_fee_xrp=open_order.get("fee_xrp", 0.0) + cancel_fee_xrp
+            fee_xrp=open_order.get("fee_xrp", 0.0) + cancel_fee_xrp
         )
         
         # Store in database and remove from open orders
