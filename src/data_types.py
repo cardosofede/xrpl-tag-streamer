@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field, computed_field
 
-from trading_config import find_trading_pair, TradingPair
+from src.trading_config import find_trading_pair, TradingPair
 
 
 class TransactionType(str, Enum):
